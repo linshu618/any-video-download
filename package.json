@@ -1,0 +1,17 @@
+{
+  "name": "any-video-download",
+  "private": true,
+  "version": "1.2.3",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild background/main.js --bundle --format=esm --outfile=background/service-worker.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "fast-xml-parser": "5.11.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "linkedom": "^0.18.12"
+  }
+}

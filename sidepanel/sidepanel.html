@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>Any Video Download</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <div class="header">
+    <span class="title">Any Video Download</span>
+    <button id="rescanBtn" class="copy" title="广告结束后可重新扫描播放器及媒体请求">重新扫描</button>
+    <button id="clearBtn" class="clear-btn" title="清空列表">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="3 6 5 6 21 6"/>
+        <path d="M19 6l-1 14H6L5 6"/>
+        <path d="M10 11v6M14 11v6"/>
+        <path d="M9 6V4h6v2"/>
+      </svg>
+    </button>
+  </div>
+
+  <nav class="view-tabs" aria-label="视频与下载">
+    <button id="mediaTab" class="view-tab selected" aria-pressed="true">网页视频</button>
+    <button id="historyTab" class="view-tab" aria-pressed="false">下载记录 <span id="downloadCount">0</span></button>
+  </nav>
+  <div id="panelNotice" class="panel-notice" role="alert" hidden></div>
+  <div id="playerStatus" class="player-status" hidden></div>
+  <div id="content">
+    <div class="empty-state">
+      <div class="spinner"></div>
+      <p>正在等待媒体...</p>
+    </div>
+  </div>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>
