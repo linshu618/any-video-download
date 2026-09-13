@@ -2,8 +2,10 @@ let currentTabId = null;
 let latest = [];
 let playback = [];
 let records = [], view = 'media', refreshing = false;
+let clearingHistory = false;
 const jobs = new Map(), choices = new Map();
 const submitting = new Set();
+const fileActions = new Set();
 const content = document.getElementById('content');
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function notice(message) {
@@ -30,7 +32,8 @@ function sourceKey(value) {
 }
 function playerFor(video) {
   const urls=[video.url,...(video.related || [])].map(sourceKey).filter(Boolean);
-  return playback.find(p=>p.visible && Date.now()-p.reportedAt<15000 && (p.frameId || 0)===(video.frameId || 0) && sourceKey(p.src) && urls.includes(sourceKey(p.src)));
+  return playback.find(p=>p.visible && Date.now()-p.reportedAt<15000 && (p.frameId || 0)===(video.frameId || 0) &&
+    (sourceKey(p.src) && urls.includes(sourceKey(p.src)) || video.playerSrc===p.src && Math.abs(video.duration-p.duration)<2));
 }
 function renderPlayers() {
   const node=document.getElementById('playerStatus');
@@ -67,14 +70,22 @@ function renderHistory() {
     <div class="video-name" title="${escape(job.title)}">${escape(job.title)}</div>
     <div class="history-date">${escape(new Date(job.createdAt).toLocaleString())} · ${escape(job.kind.toUpperCase())}</div>
     ${progressHTML(job)}${job.path?`<div class="file-path">${escape(job.path)}</div>`:''}
-    <div class="history-actions">${isActive(job)?'<button class="cancel-job">取消下载</button>':''}${job.path?'<button class="copy-path">复制保存路径</button>':''}${job.browserId!=null && job.status==='complete'?'<button class="show-file">在文件夹中显示</button>':''}</div>
+    <div class="history-actions">${isActive(job)?'<button class="cancel-job">取消下载</button>':''}${job.path?'<button class="copy-path">复制保存路径</button>':''}${job.path && job.status==='complete'?`<button class="open-file" ${fileActions.has(job.id)?'disabled':''}>打开视频</button><button class="show-file" ${fileActions.has(job.id)?'disabled':''}>在文件夹中显示</button>`:''}</div>
     </article>`).join('') : '<div class="empty-state"><p>还没有下载记录</p><p>新下载的进度和结果会保存在这里。</p></div>';
   for(const card of content.querySelectorAll('[data-job]')) {
     const job=records.find(r=>r.id===card.dataset.job);
     card.querySelector('.cancel-job')?.addEventListener('click',()=>cancelJob(job.id));
     card.querySelector('.copy-path')?.addEventListener('click',async e=>{try{await navigator.clipboard.writeText(job.path);e.target.textContent='已复制';}catch{e.target.textContent='复制失败';}});
-    card.querySelector('.show-file')?.addEventListener('click',()=>chrome.downloads.showInFolder(job.browserId));
+    card.querySelector('.show-file')?.addEventListener('click',()=>actOnFile(job.id,'reveal'));
+    card.querySelector('.open-file')?.addEventListener('click',()=>actOnFile(job.id,'open'));
   }
+}
+async function actOnFile(id,action) {
+  if(fileActions.has(id))return;
+  fileActions.add(id);notice('');render();
+  try {const result=await request({type:'FILE_ACTION',id,action});if(!result?.ok)throw new Error(result?.error || '后台未确认文件操作');}
+  catch(error){notice(error.message);}
+  finally{fileActions.delete(id);render();}
 }
 async function cancelJob(id) {
   try {const result=await request({type:'CANCEL_DOWNLOAD',id});if(!result?.ok)throw new Error(result?.error || '后台未确认取消操作');await refreshRecords();}
@@ -94,6 +105,10 @@ async function refreshRecords() {
   } catch(error) {notice(error.message);} finally {refreshing=false;}
 }
 function render() {
+  const clearHistoryButton=document.getElementById('clearHistoryBtn');
+  clearHistoryButton.hidden=view!=='history';
+  clearHistoryButton.disabled=clearingHistory || !records.some(job=>!isActive(job));
+  clearHistoryButton.textContent=clearingHistory?'清空中…':'清空历史记录';
   renderPlayers();
   if(view==='history'){renderHistory();return;}
   if(!latest.length) {content.innerHTML = '<div class="empty-state"><p>播放网页视频后，会在这里显示。</p><button id="scan">重新扫描</button></div>'; document.getElementById('scan').onclick=rescan; return;}
@@ -104,7 +119,7 @@ function render() {
     return `<div class="video-item" data-id="${escape(v.id)}">
       ${v.poster ? `<img class="poster" src="${escape(v.poster)}" alt="视频封面" referrerpolicy="no-referrer">` : ''}
       <div class="video-info"><div class="video-name" title="${escape(v.title)}">${escape(v.title)}</div>
-        <div class="video-meta"><span class="badge">${escape(v.kind === 'file' ? '视频' : v.kind.toUpperCase())}</span>
+        <div class="video-meta"><span class="badge">${escape(v.kind === 'file' ? '视频' : v.kind === 'paired' ? '音视频' : v.kind.toUpperCase())}</span>
         ${variants.length ? `<select class="quality" aria-label="清晰度" ${job?.active ? 'disabled' : ''}>${options}</select>` : ''}
         ${player?'<span class="badge">播放器</span>':''}
         <span class="size">${escape([duration(player?.duration || v.duration),v.kind === 'file' ? size(v.size) : '',v.live ? '直播' : ''].filter(Boolean).join(' · '))}</span></div>
@@ -154,5 +169,15 @@ const [tab] = await chrome.tabs.query({active:true,currentWindow:true});
 document.getElementById('mediaTab').onclick=()=>switchView('media');
 document.getElementById('rescanBtn').onclick=()=>{notice('');rescan();};
 document.getElementById('historyTab').onclick=()=>{switchView('history');refreshRecords();};
+document.getElementById('clearHistoryBtn').onclick=async()=>{
+  if(clearingHistory)return;
+  clearingHistory=true;notice('');render();
+  try {
+    const result=await request({type:'CLEAR_DOWNLOAD_HISTORY'});
+    if(!result?.ok)throw new Error(result?.error || '后台未确认清空操作，可能仍在运行旧版。请等当前下载结束，在 chrome://extensions 找到 Any Video Download，点击卡片上的“重新加载”（圆形箭头），重新打开侧栏后重试。');
+    await refreshRecords();
+  }catch(error){notice(`清空失败：${error.message}`);}
+  finally{clearingHistory=false;render();}
+};
 currentTabId=tab?.id; await load(); await refreshRecords();rescan();
 setInterval(refreshRecords,1000);

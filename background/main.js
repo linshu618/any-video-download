@@ -1,6 +1,7 @@
 import { classify, httpUrl, parseHls, parseDash, mergeMedia } from './media.js';
 import { DownloadManager } from './downloads.js';
 import { isExtensionPage } from './sender.js';
+import { playerMedia } from './player-media.js';
 const downloads = new DownloadManager(chrome);
 chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true}).catch(console.error);
 const queues = new Map(), inFlight = new Map();
@@ -49,6 +50,7 @@ async function discover(tabId, candidate) {
     await serial(tabId, async () => {
       const s = await state(tabId); epoch = s.epoch;flight.epoch=epoch;
       const old = s.videos.find(v => v.url === candidate.url);
+      if(old?.siteVideoId)return; // Keep an explicit player association when a raw track is observed again.
       if(old?.kind && candidate.type==='video/unknown'){kind=old.kind;candidate.type=old.type;}
       if (s.videos.some(v => v.segments?.includes(candidate.url))) return;
       const refresh=kind!=='file' && (candidate.forceRefresh || !old?.parsed || Date.now()-(old.parsedAt || 0)>10000);
@@ -91,7 +93,7 @@ async function discover(tabId, candidate) {
 }
 async function refreshPlayer(tabId,frameId) {
   const s=await state(tabId);
-  for(const row of s.videos.filter(v=>v.kind!=='file' && (v.frameId || 0)===frameId).slice(-20)) {
+  for(const row of s.videos.filter(v=>['hls','dash'].includes(v.kind) && (v.frameId || 0)===frameId).slice(-20)) {
     discover(tabId,{url:row.url,kind:row.kind,frameId,forceRefresh:true});
   }
 }
@@ -106,15 +108,32 @@ chrome.webRequest.onResponseStarted.addListener(details => {
 },{urls:['<all_urls>']},['responseHeaders']);
 chrome.runtime.onMessage.addListener((msg,sender,reply) => {
   if (sender.id !== chrome.runtime.id) return;
-  if(['GET_DOWNLOADS','START_DOWNLOAD','CANCEL_DOWNLOAD'].includes(msg.type)) {
+  if(['GET_DOWNLOADS','START_DOWNLOAD','CANCEL_DOWNLOAD','FILE_ACTION','CLEAR_DOWNLOAD_HISTORY'].includes(msg.type)) {
     if(!isExtensionPage(sender,chrome.runtime.id)) {reply({error:'下载请求来源校验失败，请从扩展侧栏重试。'});return;}
     const operation=msg.type==='GET_DOWNLOADS' ? downloads.list().then(records=>({records}))
+      : msg.type==='CLEAR_DOWNLOAD_HISTORY' ? downloads.clearHistory().then(result=>({ok:true,...result}))
+      : msg.type==='FILE_ACTION' ? downloads.fileAction(msg.id,msg.action)
       : msg.type==='START_DOWNLOAD' ? downloads.start(msg.job).then(job=>({job}))
       : downloads.cancel(msg.id).then(()=>({ok:true}));
     operation.then(reply,error=>reply({error:error.message}));return true;
   }
   if(msg.type === 'GET_VIDEOS') {state(msg.tabId).then(s => reply({videos:s.videos,players:s.players || []})); return true;}
   if(msg.type === 'CLEAR_VIDEOS') {reset(msg.tabId).then(() => reply({ok:true})); return true;}
+  if(msg.type==='PLAYER_MEDIA' && sender.tab) {
+    let origin;try{origin=new URL(sender.url || sender.origin);}catch{return;}
+    if(!/(^|\.)douyin\.com$/.test(origin.hostname))return;
+    serial(sender.tab.id,async()=>{
+      const s=await state(sender.tab.id),frameId=sender.frameId || 0;
+      for(const input of (Array.isArray(msg.items)?msg.items:[]).slice(0,5)) {
+        const item=playerMedia(input,frameId);if(!item)continue;
+        if(!s.players?.some(p=>p.frameId===frameId && p.src===item.playerSrc && Math.abs(p.duration-item.duration)<2))continue;
+        const old=s.videos.find(v=>v.siteVideoId===item.siteVideoId && v.frameId===frameId);
+        const row={...item,id:old?.id || crypto.randomUUID(),timestamp:Date.now(),pageUrl:sender.tab.url || s.pageUrl};
+        s.videos=mergeMedia(s.videos.filter(v=>v!==old),row).slice(-200);
+      }
+      await publish(sender.tab.id,s);
+    }).catch(console.error);return;
+  }
   if(msg.type === 'PLAYER_CHANGED' && sender.tab) {
     refreshPlayer(sender.tab.id,sender.frameId || 0).catch(console.error);return;
   }

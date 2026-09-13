@@ -4,8 +4,8 @@ import vm from 'node:vm';
 import fs from 'node:fs/promises';
 const code=await fs.readFile(new URL('../background/service-worker.js',import.meta.url),'utf8');
 function event() {let callback; return {addListener(fn){callback=fn;},emit(...args){return callback?.(...args);}};}
-function harness(fetcher=fetch) {
-  const storage={}, messages=[];
+function harness(fetcher=fetch, initialStorage={}) {
+  const storage=structuredClone(initialStorage), messages=[];
   const chrome={sidePanel:{setPanelBehavior:async()=>{}},storage:{session:{get:async key=>structuredClone({[key]:storage[key]}),set:async values=>Object.assign(storage,structuredClone(values)),remove:async key=>{delete storage[key];}}},
     action:{setBadgeText:async()=>{}},tabs:{get:async()=>({title:'Page',url:'https://page.test'}),onUpdated:event(),onRemoved:event()},
     runtime:{id:'test',onMessage:event(),sendMessage:async msg=>{messages.push(msg);}},webRequest:{onResponseStarted:event()}};
@@ -15,6 +15,24 @@ function harness(fetcher=fetch) {
   return {chrome,messages,rows:()=>storage.media_v2_1?.videos || [],request(url,type='video/mp4'){chrome.webRequest.onResponseStarted.emit({tabId:1,url,statusCode:200,responseHeaders:[{name:'content-type',value:type}]});}};
 }
 async function until(check) {for(let i=0;i<100;i++){if(check())return;await new Promise(r=>setTimeout(r,10));}assert.fail('Timed out waiting for worker state');}
+
+test('Built worker acknowledges clear history, persists it and rejects content-script requests',async()=>{
+  const h=harness(fetch,{download_history_v1:[{id:'done',kind:'file',status:'complete',path:'C:/Downloads/video.mp4'}]});
+  const sender={id:'test',url:'chrome-extension://test/sidepanel/sidepanel.html'};
+  const send=async(type,from=sender)=>{
+    let response;
+    h.chrome.runtime.onMessage.emit({type},from,value=>{response=value;});
+    await until(()=>response!==undefined);return response;
+  };
+  assert.equal((await send('GET_DOWNLOADS')).records.length,1);
+  assert.ok((await send('CLEAR_DOWNLOAD_HISTORY',{id:'test',url:'https://page.test',tab:{id:1}})).error);
+  assert.equal((await send('GET_DOWNLOADS')).records.length,1);
+  const result=await send('CLEAR_DOWNLOAD_HISTORY');
+  assert.equal(result.ok,true);assert.equal(result.removed,1);
+  assert.equal((await send('GET_DOWNLOADS')).records.length,0);
+  const saved=await h.chrome.storage.local.get('download_history_v1');
+  assert.equal(saved.download_history_v1.length,0);
+});
 test('Concurrent discoveries retain all distinct files in one tab',async()=>{
   const h=harness();for(let i=0;i<20;i++)h.request(`https://cdn.test/${i}.mp4`);
   await until(()=>h.rows().length===20);
@@ -69,4 +87,16 @@ test('A resource-only rescan cannot erase already known player metadata',async()
   scan([{url,type:'video/unknown',duration:2179}]);await until(()=>h.rows()[0]?.duration===2179);
   scan([{url}]);await new Promise(r=>setTimeout(r,30));
   assert.equal(h.rows()[0].duration,2179);
+});
+
+test('Player evidence groups raw video/audio requests and survives later track responses',async()=>{
+  const h=harness();const sender={id:'test',tab:{id:1,url:'https://www.douyin.com/jingxuan?modal_id=123'},url:'https://www.douyin.com/',frameId:0};
+  const src='blob:https://www.douyin.com/current';
+  h.request('https://cdn.test/video');h.request('https://cdn.test/audio');await until(()=>h.rows().length===2);
+  h.chrome.runtime.onMessage.emit({type:'PLAYER_STATE',players:[{id:'p',src,duration:333,visible:true}]},sender,()=>{});
+  h.chrome.runtime.onMessage.emit({type:'PLAYER_MEDIA',items:[{siteVideoId:'123',url:'https://cdn.test/video',kind:'paired',duration:333,playerSrc:src,title:'Current',variants:[{url:'https://cdn.test/video',audioUrl:'https://cdn.test/audio',height:720}]}]},sender,()=>{});
+  await until(()=>h.rows().length===1 && h.rows()[0].kind==='paired');
+  assert.equal(h.rows()[0].title,'Current');
+  h.request('https://cdn.test/video');h.request('https://cdn.test/audio');await new Promise(r=>setTimeout(r,40));
+  assert.equal(h.rows().length,1);assert.equal(h.rows()[0].kind,'paired');assert.equal(h.rows()[0].variants[0].audioUrl,'https://cdn.test/audio');
 });

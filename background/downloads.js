@@ -35,9 +35,28 @@ export class DownloadManager {
     if(changed) await this.save();
   }
   list() {return this.run(async()=>{await this.refreshFiles();return structuredClone(this.rows);});}
+  clearHistory() {
+    return this.run(async()=>{
+      const previous=this.rows;
+      this.rows=previous.filter(active);
+      try {await this.save();}catch(error){this.rows=previous;throw error;}
+      return {removed:previous.length-this.rows.length};
+    });
+  }
+  async fileAction(id,action) {
+    if(!['open','reveal'].includes(action))throw new Error('不支持的文件操作');
+    const row=await this.run(()=>structuredClone(this.rows.find(r=>r.id===id)));
+    if(!row || row.status!=='complete' || !row.path)throw new Error('此记录没有已完成的文件');
+    let result;
+    try {result=await this.api.runtime.sendNativeMessage('com.any_video_download.helper',{type:'file_action',action,path:row.path});}
+    catch {throw new Error('无法连接文件助手，请检查本地助手是否已安装。');}
+    if(!result?.ok)throw new Error(result?.error || '文件助手未确认操作，请更新并重新加载扩展。');
+    return {ok:true};
+  }
   start(input) {
     return this.run(async()=>{
-      if(!['file','hls','dash'].includes(input.kind) || !/^https?:$/.test(new URL(input.url).protocol)) throw new Error('无效的媒体地址');
+      if(!['file','hls','dash','paired'].includes(input.kind) || !/^https?:$/.test(new URL(input.url).protocol)) throw new Error('无效的媒体地址');
+      if(input.kind==='paired' && (!input.audioUrl || !/^https?:$/.test(new URL(input.audioUrl).protocol)))throw new Error('缺少有效音轨地址');
       const existing=this.rows.find(r=>input.mediaId && r.mediaId===input.mediaId && active(r));
       if(existing) return structuredClone(existing);
       const row={id:crypto.randomUUID(),mediaId:input.mediaId,title:String(input.title || '视频').slice(0,300),kind:input.kind,

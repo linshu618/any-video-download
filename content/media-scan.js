@@ -1,5 +1,5 @@
 (() => {
-  const sent=new Set(), resources=new Map(), players=new WeakMap(), playerIds=new WeakMap();let pending=null,force=false,nextPlayerId=0,lastReport=0;
+  const sent=new Set(), resources=new Map(), players=new WeakMap(), playerIds=new WeakMap();let pending=null,force=false,nextPlayerId=0,lastReport=0,bridged=[],bridgeAt=0,bridgeSent='';
   function allVideos(root=document,seen=new Set()) {
     if(seen.has(root))return [];seen.add(root);
     const found=[...root.querySelectorAll('video')];
@@ -11,7 +11,7 @@
   }
   function scan() {
     pending=null;
-    const items=[],playback=[];let changed=force;force=false;
+    const items=[],playback=[];let changed=force;const forced=force;force=false;
     for(const video of allVideos()) {
       const src=video.currentSrc || video.src || '',duration=Number.isFinite(video.duration)?video.duration:null;
       const old=players.get(video);
@@ -29,6 +29,12 @@
     }
     if(changed || Date.now()-lastReport>5000){lastReport=Date.now();chrome.runtime.sendMessage({type:'PLAYER_STATE',players:playback}).catch(()=>{});}
     if(changed)chrome.runtime.sendMessage({type:'PLAYER_CHANGED'}).catch(()=>{});
+    const matched=Date.now()-bridgeAt<10000?bridged.filter(item=>playback.some(p=>p.src===item.playerSrc && Math.abs(p.duration-item.duration)<2)):[];
+    const bridgeKey=JSON.stringify(matched);
+    if(matched.length && (forced || bridgeKey!==bridgeSent)) {
+      bridgeSent=bridgeKey;
+      chrome.runtime.sendMessage({type:'PLAYER_MEDIA',items:matched}).catch(()=>{bridgeSent='';});
+    }
     items.push(...resources.values());resources.clear();
     const fresh=items.filter(item=>{const key=JSON.stringify(item);if(sent.has(key))return false;sent.add(key);return true;});
     if(sent.size>5000)sent.clear();
@@ -40,6 +46,10 @@
   }
   // Throttle rather than debounce: continuous media requests must not starve the scan.
   function schedule(){if(pending===null)pending=setTimeout(scan,300);}
+  if(typeof window!=='undefined')window.addEventListener('message',event=>{
+    if(event.source!==window || event.data?.channel!=='avd-douyin-player-v1' || !/(^|\.)douyin\.com$/.test(location.hostname))return;
+    bridged=(Array.isArray(event.data.items)?event.data.items:[]).slice(0,5);bridgeAt=Date.now();schedule();
+  });
   new MutationObserver(schedule).observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['src','poster']});
   for(const event of ['loadstart','emptied','loadedmetadata','durationchange','playing','play','ended'])document.addEventListener(event,schedule,true);
   collect(performance.getEntriesByType('resource'));

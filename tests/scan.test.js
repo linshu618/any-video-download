@@ -7,11 +7,12 @@ function setup(initial=[]) {
   const messages=[],timers=new Map(),events={},observers={};let index=0;
   const video={currentSrc:'',src:'',duration:15,poster:'',videoWidth:640,videoHeight:360,querySelector:()=>null,querySelectorAll:()=>[],getAttribute:()=>null};
   const chrome={runtime:{sendMessage:async m=>messages.push(m),onMessage:{addListener(fn){events.message=fn;}}}};
-  vm.runInNewContext(code,{chrome,document:{documentElement:{},querySelectorAll:()=>[video],addEventListener:(name,fn)=>events[name]=fn},
+  const window={addEventListener:(name,fn)=>events['window:'+name]=fn};
+  vm.runInNewContext(code,{chrome,window,location:new URL('https://www.douyin.com/'),document:{documentElement:{},querySelectorAll:()=>[video],addEventListener:(name,fn)=>events[name]=fn},
     performance:{getEntriesByType:()=>initial},MutationObserver:class{constructor(fn){observers.mutation=fn;}observe(){}},
     PerformanceObserver:class{constructor(fn){observers.performance=fn;}observe(){}},
     setTimeout(fn){timers.set(++index,fn);return index;},clearTimeout(id){timers.delete(id);},setInterval(){},URL,console});
-  return {messages,events,observers,video,timers,flush(){const tasks=[...timers.values()];timers.clear();tasks.forEach(fn=>fn());}};
+  return {messages,events,observers,video,timers,window,flush(){const tasks=[...timers.values()];timers.clear();tasks.forEach(fn=>fn());}};
 }
 test('Resource observer discovers post-ad media even when performance buffer is full',()=>{
   const h=setup();
@@ -47,4 +48,11 @@ test('Unused source elements do not inherit the current main-video duration',()=
   h.events.loadedmetadata();h.flush();
   const ad=h.messages.filter(m=>m.type==='MEDIA_SCAN').flatMap(m=>m.items).find(i=>i.url==='https://cdn.test/old-ad.mp4');
   assert.equal(ad?.duration,undefined);
+});
+
+test('Page bridge forwards only evidence matching an actual current player',()=>{
+  const h=setup();h.video.currentSrc='blob:https://www.douyin.com/current';h.video.duration=333;
+  const receive=playerSrc=>h.events['window:message']({source:h.window,data:{channel:'avd-douyin-player-v1',items:[{playerSrc,duration:333,siteVideoId:'123'}]}});
+  receive('blob:https://www.douyin.com/next');h.flush();assert.equal(h.messages.some(m=>m.type==='PLAYER_MEDIA'),false);
+  receive(h.video.currentSrc);h.flush();assert.equal(h.messages.find(m=>m.type==='PLAYER_MEDIA').items[0].siteVideoId,'123');
 });

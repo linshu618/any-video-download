@@ -5,9 +5,9 @@ import vm from 'node:vm';
 import {parseHTML} from 'linkedom';
 const html=await fs.readFile(new URL('../sidepanel/sidepanel.html',import.meta.url),'utf8');
 const code=await fs.readFile(new URL('../sidepanel/sidepanel.js',import.meta.url),'utf8');
-async function panel(records, videos=[], start=async job=>({job:{...job,id:'created',status:'starting',createdAt:Date.now()}}), players=[]) {
+async function panel(records, videos=[], start=async job=>({job:{...job,id:'created',status:'starting',createdAt:Date.now()}}), players=[], fileAction=async()=>({ok:true}), clearHistory=async()=>({ok:true})) {
   const {document}=parseHTML(html);let listener;
-  const chrome={runtime:{sendMessage:async msg=>msg.type==='GET_DOWNLOADS'?{records}:msg.type==='GET_VIDEOS'?{videos,players}:msg.type==='START_DOWNLOAD'?start(msg.job): {},onMessage:{addListener(fn){listener=fn;}}},
+  const chrome={runtime:{sendMessage:async msg=>msg.type==='GET_DOWNLOADS'?{records}:msg.type==='GET_VIDEOS'?{videos,players}:msg.type==='START_DOWNLOAD'?start(msg.job):msg.type==='FILE_ACTION'?fileAction(msg):msg.type==='CLEAR_DOWNLOAD_HISTORY'?clearHistory(): {},onMessage:{addListener(fn){listener=fn;}}},
     tabs:{query:async()=>[{id:1}],sendMessage:async()=>{},onActivated:{addListener(){}}},downloads:{showInFolder(){}}};
   await vm.runInNewContext(`(async()=>{${code}\n})()`,{document,chrome,navigator:{clipboard:{writeText:async()=>{}}},URL,console,setTimeout,clearTimeout,setInterval(){},alert(){}});
   return {document,update(next){records.splice(0,records.length,...next);listener({type:'DOWNLOADS_CHANGED'});}};
@@ -53,4 +53,43 @@ test('Exact player source is prioritized over a newly detected unrelated media f
   const {document}=await panel([],[{id:'ad',url:'https://cdn.test/ad.mp4',title:'Ad',kind:'file',timestamp:2},{id:'main',url:'https://cdn.test/main.mp4',title:'Main',kind:'file',timestamp:1,frameId:0}],undefined,[{src:'https://cdn.test/main.mp4#t=2',duration:2179,visible:true,frameId:0,reportedAt:Date.now()}]);
   assert.equal(document.querySelector('.video-item').dataset.id,'main');
   assert.match(document.querySelector('.video-item').textContent,/播放器/);
+});
+
+test('A blob-associated pair is prioritized and submits both tracks',async()=>{
+  let job;
+  const {document}=await panel([],[{id:'other',url:'https://cdn.test/other',kind:'file',timestamp:2},{id:'main',url:'https://cdn.test/video',kind:'paired',playerSrc:'blob:https://site.test/current',duration:333,frameId:0,variants:[{url:'https://cdn.test/video',audioUrl:'https://cdn.test/audio',height:720}]}],async input=>{job=input;return {job:{id:'ok',...input}};},[{src:'blob:https://site.test/current',duration:333,visible:true,frameId:0,reportedAt:Date.now()}]);
+  assert.equal(document.querySelector('.video-item').dataset.id,'main');
+  assert.match(document.querySelector('.video-item').textContent,/播放器/);
+  document.querySelector('.download-btn').click();await new Promise(r=>setTimeout(r,20));
+  assert.equal(job.audioUrl,'https://cdn.test/audio');assert.equal(job.kind,'paired');
+});
+
+test('Both native and browser history expose folder and video actions with visible errors',async()=>{
+  const calls=[];
+  const {document}=await panel([{id:'native',kind:'paired',status:'complete',path:'C:/Downloads/a.mp4'},{id:'browser',kind:'file',status:'complete',path:'C:/Downloads/b.mp4',browserId:7}],[],undefined,[],async msg=>{calls.push(msg);return {error:'文件已移动或删除'};});
+  document.getElementById('historyTab').click();
+  assert.equal(document.querySelectorAll('.show-file').length,2);
+  assert.equal(document.querySelectorAll('.open-file').length,2);
+  document.querySelector('.show-file').click();await new Promise(r=>setTimeout(r,20));
+  assert.equal(calls[0].id,'native');assert.equal(calls[0].action,'reveal');assert.equal(calls[0].path,undefined);
+  assert.match(document.getElementById('panelNotice').textContent,/文件已移动或删除/);
+});
+
+test('Unacknowledged history clear keeps records and explains how to reload the extension',async()=>{
+  const {document}=await panel([{id:'done',kind:'file',status:'complete'}],[],undefined,[],undefined,async()=>undefined);
+  document.getElementById('historyTab').click();
+  document.getElementById('clearHistoryBtn').click();await new Promise(r=>setTimeout(r,30));
+  assert.match(document.getElementById('panelNotice').textContent,/chrome:\/\/extensions/);
+  assert.match(document.getElementById('panelNotice').textContent,/重新加载/);
+  assert.equal(document.querySelectorAll('.history-item').length,1);
+});
+
+test('History clear button removes ended records, keeps current tasks and disables when nothing is clearable',async()=>{
+  const rows=[{id:'ended',kind:'file',status:'complete'},{id:'current',kind:'hls',status:'downloading'}];
+  const {document}=await panel(rows,[],undefined,[],undefined,async()=>{rows.splice(0,1);return {ok:true,removed:1};});
+  const button=document.getElementById('clearHistoryBtn');assert.ok(button);assert.equal(button.hidden,true);
+  document.getElementById('historyTab').click();assert.equal(button.hidden,false);assert.equal(button.disabled,false);
+  button.click();await new Promise(r=>setTimeout(r,30));
+  assert.equal(document.querySelectorAll('.history-item').length,1);
+  assert.equal(document.querySelector('.history-item').dataset.job,'current');assert.equal(button.disabled,true);
 });

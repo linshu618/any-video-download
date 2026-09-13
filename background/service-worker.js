@@ -4301,9 +4301,36 @@ var DownloadManager = class {
       return structuredClone(this.rows);
     });
   }
+  clearHistory() {
+    return this.run(async () => {
+      const previous = this.rows;
+      this.rows = previous.filter(active);
+      try {
+        await this.save();
+      } catch (error) {
+        this.rows = previous;
+        throw error;
+      }
+      return { removed: previous.length - this.rows.length };
+    });
+  }
+  async fileAction(id, action) {
+    if (!["open", "reveal"].includes(action)) throw new Error("\u4E0D\u652F\u6301\u7684\u6587\u4EF6\u64CD\u4F5C");
+    const row = await this.run(() => structuredClone(this.rows.find((r) => r.id === id)));
+    if (!row || row.status !== "complete" || !row.path) throw new Error("\u6B64\u8BB0\u5F55\u6CA1\u6709\u5DF2\u5B8C\u6210\u7684\u6587\u4EF6");
+    let result;
+    try {
+      result = await this.api.runtime.sendNativeMessage("com.any_video_download.helper", { type: "file_action", action, path: row.path });
+    } catch {
+      throw new Error("\u65E0\u6CD5\u8FDE\u63A5\u6587\u4EF6\u52A9\u624B\uFF0C\u8BF7\u68C0\u67E5\u672C\u5730\u52A9\u624B\u662F\u5426\u5DF2\u5B89\u88C5\u3002");
+    }
+    if (!result?.ok) throw new Error(result?.error || "\u6587\u4EF6\u52A9\u624B\u672A\u786E\u8BA4\u64CD\u4F5C\uFF0C\u8BF7\u66F4\u65B0\u5E76\u91CD\u65B0\u52A0\u8F7D\u6269\u5C55\u3002");
+    return { ok: true };
+  }
   start(input) {
     return this.run(async () => {
-      if (!["file", "hls", "dash"].includes(input.kind) || !/^https?:$/.test(new URL(input.url).protocol)) throw new Error("\u65E0\u6548\u7684\u5A92\u4F53\u5730\u5740");
+      if (!["file", "hls", "dash", "paired"].includes(input.kind) || !/^https?:$/.test(new URL(input.url).protocol)) throw new Error("\u65E0\u6548\u7684\u5A92\u4F53\u5730\u5740");
+      if (input.kind === "paired" && (!input.audioUrl || !/^https?:$/.test(new URL(input.audioUrl).protocol))) throw new Error("\u7F3A\u5C11\u6709\u6548\u97F3\u8F68\u5730\u5740");
       const existing = this.rows.find((r) => input.mediaId && r.mediaId === input.mediaId && active(r));
       if (existing) return structuredClone(existing);
       const row = {
@@ -4404,6 +4431,37 @@ function isExtensionPage(sender, id) {
   return !sender.tab;
 }
 
+// background/player-media.js
+function playerMedia(item, frameId) {
+  if (!item || !/^\d{1,30}$/.test(String(item.siteVideoId)) || !["paired", "file"].includes(item.kind)) return null;
+  const url = httpUrl(item.url), playerSrc = typeof item.playerSrc === "string" ? item.playerSrc.slice(0, 16e3) : "";
+  if (!url || !/^(blob:https?:|https?:)/.test(playerSrc) || !Number.isFinite(item.duration) || item.duration <= 0) return null;
+  const variants = (Array.isArray(item.variants) ? item.variants : []).slice(0, 20).map((v) => ({
+    url: httpUrl(v?.url),
+    audioUrl: httpUrl(v?.audioUrl),
+    width: Number(v?.width) || null,
+    height: Number(v?.height) || null,
+    bandwidth: Number(v?.bandwidth) || 0
+  })).filter((v) => v.url && (item.kind !== "paired" || v.audioUrl));
+  if (!variants.length || !variants.some((v) => v.url === url)) return null;
+  const related = [...new Set([...(Array.isArray(item.related) ? item.related : []).slice(0, 100), ...variants.flatMap((v) => [v.url, v.audioUrl])].map((v) => httpUrl(v)).filter((v) => v && v !== url))];
+  return {
+    url,
+    kind: item.kind,
+    variants,
+    related,
+    playerSrc,
+    frameId,
+    siteVideoId: String(item.siteVideoId),
+    duration: item.duration,
+    title: String(item.title || "\u6296\u97F3\u89C6\u9891").slice(0, 300),
+    poster: httpUrl(item.poster),
+    type: "video/mp4",
+    parsed: true,
+    size: null
+  };
+}
+
 // background/main.js
 var downloads = new DownloadManager(chrome);
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
@@ -4481,6 +4539,7 @@ async function discover(tabId, candidate) {
       epoch = s.epoch;
       flight.epoch = epoch;
       const old = s.videos.find((v) => v.url === candidate.url);
+      if (old?.siteVideoId) return;
       if (old?.kind && candidate.type === "video/unknown") {
         kind = old.kind;
         candidate.type = old.type;
@@ -4540,7 +4599,7 @@ async function discover(tabId, candidate) {
 }
 async function refreshPlayer(tabId, frameId) {
   const s = await state(tabId);
-  for (const row of s.videos.filter((v) => v.kind !== "file" && (v.frameId || 0) === frameId).slice(-20)) {
+  for (const row of s.videos.filter((v) => ["hls", "dash"].includes(v.kind) && (v.frameId || 0) === frameId).slice(-20)) {
     discover(tabId, { url: row.url, kind: row.kind, frameId, forceRefresh: true });
   }
 }
@@ -4556,12 +4615,12 @@ chrome.webRequest.onResponseStarted.addListener((details) => {
 }, { urls: ["<all_urls>"] }, ["responseHeaders"]);
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (sender.id !== chrome.runtime.id) return;
-  if (["GET_DOWNLOADS", "START_DOWNLOAD", "CANCEL_DOWNLOAD"].includes(msg.type)) {
+  if (["GET_DOWNLOADS", "START_DOWNLOAD", "CANCEL_DOWNLOAD", "FILE_ACTION", "CLEAR_DOWNLOAD_HISTORY"].includes(msg.type)) {
     if (!isExtensionPage(sender, chrome.runtime.id)) {
       reply({ error: "\u4E0B\u8F7D\u8BF7\u6C42\u6765\u6E90\u6821\u9A8C\u5931\u8D25\uFF0C\u8BF7\u4ECE\u6269\u5C55\u4FA7\u680F\u91CD\u8BD5\u3002" });
       return;
     }
-    const operation = msg.type === "GET_DOWNLOADS" ? downloads.list().then((records) => ({ records })) : msg.type === "START_DOWNLOAD" ? downloads.start(msg.job).then((job) => ({ job })) : downloads.cancel(msg.id).then(() => ({ ok: true }));
+    const operation = msg.type === "GET_DOWNLOADS" ? downloads.list().then((records) => ({ records })) : msg.type === "CLEAR_DOWNLOAD_HISTORY" ? downloads.clearHistory().then((result) => ({ ok: true, ...result })) : msg.type === "FILE_ACTION" ? downloads.fileAction(msg.id, msg.action) : msg.type === "START_DOWNLOAD" ? downloads.start(msg.job).then((job) => ({ job })) : downloads.cancel(msg.id).then(() => ({ ok: true }));
     operation.then(reply, (error) => reply({ error: error.message }));
     return true;
   }
@@ -4572,6 +4631,28 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === "CLEAR_VIDEOS") {
     reset(msg.tabId).then(() => reply({ ok: true }));
     return true;
+  }
+  if (msg.type === "PLAYER_MEDIA" && sender.tab) {
+    let origin;
+    try {
+      origin = new URL(sender.url || sender.origin);
+    } catch {
+      return;
+    }
+    if (!/(^|\.)douyin\.com$/.test(origin.hostname)) return;
+    serial(sender.tab.id, async () => {
+      const s = await state(sender.tab.id), frameId = sender.frameId || 0;
+      for (const input of (Array.isArray(msg.items) ? msg.items : []).slice(0, 5)) {
+        const item = playerMedia(input, frameId);
+        if (!item) continue;
+        if (!s.players?.some((p) => p.frameId === frameId && p.src === item.playerSrc && Math.abs(p.duration - item.duration) < 2)) continue;
+        const old = s.videos.find((v) => v.siteVideoId === item.siteVideoId && v.frameId === frameId);
+        const row = { ...item, id: old?.id || crypto.randomUUID(), timestamp: Date.now(), pageUrl: sender.tab.url || s.pageUrl };
+        s.videos = mergeMedia(s.videos.filter((v) => v !== old), row).slice(-200);
+      }
+      await publish(sender.tab.id, s);
+    }).catch(console.error);
+    return;
   }
   if (msg.type === "PLAYER_CHANGED" && sender.tab) {
     refreshPlayer(sender.tab.id, sender.frameId || 0).catch(console.error);

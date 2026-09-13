@@ -49,6 +49,15 @@ test('Native host rejects another extension origin',{skip:!config}, () => {
   const result=spawnSync(process.execPath,['native/host.js','chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/'],{windowsHide:true});
   assert.equal(result.status,1);
 });
+
+test('Native file action returns a framed missing-file error even when stdin closes',{skip:!config},()=>{
+  const body=Buffer.from(JSON.stringify({type:'file_action',action:'reveal',path:path.resolve('test-output/does-not-exist.mp4')}));
+  const header=Buffer.alloc(4);header.writeUInt32LE(body.length);
+  const result=spawnSync(process.execPath,['native/host.js',config.allowedOrigins[0]],{input:Buffer.concat([header,body]),windowsHide:true,timeout:10000});
+  assert.equal(result.status,0);assert.ok(result.stdout.length>4);
+  const reply=JSON.parse(result.stdout.subarray(4,4+result.stdout.readUInt32LE(0)));
+  assert.equal(reply.ok,false);assert.match(reply.error,/不存在|移动|删除/);
+});
 test('Real DASH download honors selected resolution and retains audio',{timeout:45000,skip:!config},async()=>{
   const folder=await fs.mkdtemp(path.resolve('test-output/dash-'));
   const generated=spawnSync(config.ffmpeg,['-v','error','-f','lavfi','-i','color=c=blue:s=160x90:r=10','-f','lavfi','-i','color=c=red:s=320x180:r=10','-f','lavfi','-i','sine=frequency=440:sample_rate=44100','-t','2','-map','0:v','-map','1:v','-map','2:a','-c:v','libx264','-c:a','aac','-f','dash','movie.mpd'],{windowsHide:true,cwd:folder});

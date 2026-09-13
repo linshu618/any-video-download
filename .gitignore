@@ -3,3 +3,7 @@ native/config.json
 native/host-manifest.json
 native/launch.cmd
 test-output/
+.env
+.env.*
+!.env.example
+icons/icon-concept-*.png

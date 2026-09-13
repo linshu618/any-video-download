@@ -62,3 +62,38 @@ test('Connection failure persists a useful record without saving signed URLs',as
   assert.equal((await manager.list())[0].status,'interrupted');
   assert.equal(JSON.stringify(data).includes('token=private'),false);
 });
+
+test('Separate video/audio files use the native helper and persist no source URLs',async()=>{
+  const data={},chrome=api(data),manager=new mod.DownloadManager(chrome);
+  const row=await manager.start({kind:'paired',url:'https://cdn.test/video',audioUrl:'https://cdn.test/audio',duration:333});
+  assert.equal(chrome.ports.length,1);assert.equal(row.browserId,undefined);
+  assert.equal(JSON.stringify(data).includes('cdn.test'),false);
+  await assert.rejects(()=>manager.start({kind:'paired',url:'https://cdn.test/video'}));
+});
+
+test('File action resolves the recorded path and rejects unknown or incomplete jobs',async()=>{
+  const chrome=api({download_history_v1:[{id:'native',kind:'paired',status:'complete',path:'C:/Downloads/a.mp4'},{id:'pending',kind:'file',status:'downloading'}]});
+  const calls=[];chrome.runtime.sendNativeMessage=async(host,msg)=>{calls.push(msg);return {ok:true};};
+  const manager=new mod.DownloadManager(chrome);
+  assert.equal(typeof manager.fileAction,'function');
+  assert.deepEqual(await manager.fileAction('native','reveal'),{ok:true});
+  assert.equal(calls[0].path,'C:/Downloads/a.mp4');
+  await assert.rejects(()=>manager.fileAction('unknown','reveal'));
+  await assert.rejects(()=>manager.fileAction('pending','open'));
+  await assert.rejects(()=>manager.fileAction('native','execute'));
+});
+
+test('Clearing history persists removal of ended jobs while keeping an active download usable',async()=>{
+  const data={download_history_v1:['complete','failed','cancelled','interrupted'].map(status=>({id:status,kind:'paired',status,path:'C:/Downloads/keep.mp4'}))};
+  const chrome=api(data),manager=new mod.DownloadManager(chrome);
+  const running=await manager.start({kind:'hls',url:'https://cdn.test/current',duration:100});
+  assert.equal(typeof manager.clearHistory,'function');
+  assert.deepEqual(await manager.clearHistory(),{removed:4});
+  assert.deepEqual(data.download_history_v1.map(r=>r.id),[running.id]);
+  chrome.ports[0].onMessage.emit({type:'progress',seconds:25});
+  assert.equal((await manager.list())[0].percent,25);
+  chrome.ports[0].onMessage.emit({type:'done',path:'C:/Downloads/new.mp4'});
+  await manager.list();
+  const restored=await new mod.DownloadManager(api(data)).list();
+  assert.deepEqual(restored.map(r=>r.id),[running.id]);
+});
