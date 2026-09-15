@@ -76,3 +76,20 @@ test('Real DASH download honors selected resolution and retains audio',{timeout:
     assert.ok(streams.some(s=>s.codec_type==='audio'));
   }finally{stop?.();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
+
+test('An HTTP 403 media segment reaches the user as HTTP 403, not a merge guess',{timeout:15000,skip:!config},async()=>{
+  const folder=await fs.mkdtemp(path.resolve('test-output/http403-'));
+  const server=http.createServer((req,res)=>{
+    if(req.url==='/index.m3u8'){res.writeHead(200,{'content-type':'application/vnd.apple.mpegurl'});res.end('#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:3,\nblocked.ts\n#EXT-X-ENDLIST');}
+    else res.writeHead(403).end('Forbidden');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));let stop;
+  try{
+    const error=await new Promise((resolve,reject)=>{
+      startDownload({...config,downloadDir:folder},{url:`http://127.0.0.1:${server.address().port}/index.m3u8`,kind:'hls',title:'rejected-segment'},msg=>{
+        if(msg.type==='error')resolve(msg.error);if(msg.type==='done')reject(new Error('Unexpected successful download'));
+      }).then(cancel=>stop=cancel,reject);
+    });
+    assert.match(error,/HTTP 403/);assert.match(error,/分片/);assert.doesNotMatch(error,/可能|127\.0\.0\.1|http:\/\//);
+  }finally{stop?.();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});

@@ -21,3 +21,14 @@ test('Output name cannot escape download directory or use Windows device names',
 test('DASH selects the requested resolution rather than always the first stream', () => {
   assert.equal(native.chooseVideo?.([{index:0,codec_type:'audio'},{index:1,codec_type:'video',height:360},{index:2,codec_type:'video',height:1080}],1080),2);
 });
+
+test('FFmpeg failures report evidence instead of speculative causes',()=>{
+  assert.equal(typeof native.ffmpegFailure,'function');
+  assert.match(native.ffmpegFailure('HTTP error 403 Forbidden',1),/HTTP 403/);
+  assert.match(native.ffmpegFailure('Connection timed out',1),/超时/);
+  assert.match(native.ffmpegFailure("Protocol 'httpproxy' not on whitelist 'http,https'",1),/httpproxy/);
+  const text=native.ffmpegFailure("Error when loading first segment 'https://cdn.test/secret?token=abc'\nError opening input: Invalid data found when processing input",1);
+  assert.match(text,/第一个.*分片/);assert.doesNotMatch(text,/可能|secret|token=|https:\/\//);
+  assert.match(native.ffmpegFailure('Unrecognized option strange_flag',7),/strange_flag/);
+  assert.match(native.ffmpegFailure('',7),/退出码 7/);
+});

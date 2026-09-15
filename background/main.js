@@ -2,6 +2,8 @@ import { classify, httpUrl, parseHls, parseDash, mergeMedia } from './media.js';
 import { DownloadManager } from './downloads.js';
 import { isExtensionPage } from './sender.js';
 import { playerMedia } from './player-media.js';
+import {youtubeId,createYoutubeResolver} from './youtube.js';
+const resolveYoutube=createYoutubeResolver(chrome), youtubeAttempts=new Map();
 const downloads = new DownloadManager(chrome);
 chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true}).catch(console.error);
 const queues = new Map(), inFlight = new Map();
@@ -16,7 +18,7 @@ function serial(id, task) {
 async function publish(id, value) {
   await chrome.storage.session.set({[key(id)]:value});
   await chrome.action.setBadgeText({tabId:id,text:value.videos.length ? String(value.videos.length) : ''}).catch(() => {});
-  chrome.runtime.sendMessage({type:'VIDEO_FOUND',tabId:id,videos:value.videos,players:value.players || []}).catch(() => {});
+  chrome.runtime.sendMessage({type:'VIDEO_FOUND',tabId:id,videos:value.videos,players:value.players || [],mediaNotice:value.mediaNotice || ''}).catch(() => {});
 }
 async function reset(id, pageUrl) {
   return serial(id, async () => { const s = await state(id); await publish(id,{epoch:s.epoch+1,pageUrl,videos:[]}); });
@@ -46,11 +48,12 @@ async function discover(tabId, candidate) {
   const flight={queued:null,epoch:null};inFlight.set(token,flight);
   try {
     const tab = await chrome.tabs.get(tabId);
+    if(youtubeId(tab.url))return;
     let epoch, needsParse = false;
     await serial(tabId, async () => {
       const s = await state(tabId); epoch = s.epoch;flight.epoch=epoch;
       const old = s.videos.find(v => v.url === candidate.url);
-      if(old?.siteVideoId)return; // Keep an explicit player association when a raw track is observed again.
+      if(old?.siteVideoId && !candidate.siteVideoId)return; // Keep an explicit player association when a raw track is observed again.
       if(old?.kind && candidate.type==='video/unknown'){kind=old.kind;candidate.type=old.type;}
       if (s.videos.some(v => v.segments?.includes(candidate.url))) return;
       const refresh=kind!=='file' && (candidate.forceRefresh || !old?.parsed || Date.now()-(old.parsedAt || 0)>10000);
@@ -91,6 +94,25 @@ async function discover(tabId, candidate) {
     if(flight.queued && (await state(tabId)).epoch===flight.epoch)discover(tabId,flight.queued);
   }
 }
+async function discoverYoutube(tabId,force=false) {
+  const tab=await chrome.tabs.get(tabId).catch(()=>null), videoId=youtubeId(tab?.url);
+  if(!videoId)return;
+  const before=await state(tabId), previous=youtubeAttempts.get(tabId);
+  if(!force && before.videos.some(v=>v.siteVideoId===videoId && v.kind==='youtube' && v.parsed && !v.error))return;
+  if(previous?.videoId===videoId && (previous.busy || !force && Date.now()-previous.at<60000))return;
+  const attempt={videoId,busy:true,at:Date.now()};youtubeAttempts.set(tabId,attempt);
+  const epoch=before.epoch;
+  const valid=async()=>youtubeAttempts.get(tabId)===attempt && (await state(tabId)).epoch===epoch && youtubeId((await chrome.tabs.get(tabId).catch(()=>null))?.url)===videoId;
+  try {
+    await serial(tabId,async()=>{if(!await valid())return;const s=await state(tabId);s.mediaNotice='正在读取 YouTube 视频和清晰度…';await publish(tabId,s);});
+    const media=await resolveYoutube(tab.url);
+    if(!await valid())return;
+    const s=await state(tabId), p=s.players?.find(p=>p.frameId===0 && p.visible && Math.abs(p.duration-media.duration)<2);
+    await serial(tabId,async()=>{if(!await valid())return;const current=await state(tabId);const old=current.videos.find(v=>v.siteVideoId===videoId);current.videos=[{...media,id:old?.id || crypto.randomUUID(),timestamp:Date.now(),frameId:0,playerSrc:p?.src}];current.mediaNotice='';await publish(tabId,current);});
+  }catch(error){
+    await serial(tabId,async()=>{if(!await valid())return;const s=await state(tabId);s.mediaNotice=error.message;await publish(tabId,s);});
+  }finally{attempt.busy=false;attempt.at=Date.now();}
+}
 async function refreshPlayer(tabId,frameId) {
   const s=await state(tabId);
   for(const row of s.videos.filter(v=>['hls','dash'].includes(v.kind) && (v.frameId || 0)===frameId).slice(-20)) {
@@ -117,7 +139,8 @@ chrome.runtime.onMessage.addListener((msg,sender,reply) => {
       : downloads.cancel(msg.id).then(()=>({ok:true}));
     operation.then(reply,error=>reply({error:error.message}));return true;
   }
-  if(msg.type === 'GET_VIDEOS') {state(msg.tabId).then(s => reply({videos:s.videos,players:s.players || []})); return true;}
+  if(msg.type === 'GET_VIDEOS') {state(msg.tabId).then(s => reply({videos:s.videos,players:s.players || [],mediaNotice:s.mediaNotice || ''})); if(Number.isInteger(msg.tabId))discoverYoutube(msg.tabId).catch(console.error); return true;}
+  if(msg.type==='RESOLVE_YOUTUBE' && isExtensionPage(sender,chrome.runtime.id) && Number.isInteger(msg.tabId)){chrome.tabs.get(msg.tabId).then(tab=>{const youtube=!!youtubeId(tab.url);if(youtube)discoverYoutube(msg.tabId,true).catch(console.error);reply({ok:true,youtube});},()=>reply({ok:false}));return true;}
   if(msg.type === 'CLEAR_VIDEOS') {reset(msg.tabId).then(() => reply({ok:true})); return true;}
   if(msg.type==='PLAYER_MEDIA' && sender.tab) {
     let origin;try{origin=new URL(sender.url || sender.origin);}catch{return;}
@@ -145,7 +168,10 @@ chrome.runtime.onMessage.addListener((msg,sender,reply) => {
         visible:p.visible===true,paused:p.paused===true,reportedAt:now
       }));
       s.players=[...(s.players || []).filter(p=>p.frameId!==frameId && now-p.reportedAt<15000),...incoming];
+      const yt=youtubeId(sender.tab.url);
+      for(const row of s.videos.filter(v=>yt && v.siteVideoId===yt && v.frameId===frameId)){row.playerSrc=incoming.find(p=>p.visible && Math.abs(p.duration-row.duration)<2)?.src;}
       await publish(sender.tab.id,s);
+      if(frameId===0)discoverYoutube(sender.tab.id).catch(console.error);
     }).catch(console.error);return;
   }
   if(msg.type === 'MEDIA_SCAN' && sender.tab) {
@@ -159,4 +185,4 @@ chrome.runtime.onMessage.addListener((msg,sender,reply) => {
   }
 });
 chrome.tabs.onUpdated.addListener((id,change) => {if(change.url) reset(id,change.url);});
-chrome.tabs.onRemoved.addListener(id => serial(id,() => chrome.storage.session.remove(key(id))));
+chrome.tabs.onRemoved.addListener(id => {youtubeAttempts.delete(id);serial(id,() => chrome.storage.session.remove(key(id)));});

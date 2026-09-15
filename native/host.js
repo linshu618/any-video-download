@@ -1,6 +1,7 @@
 import fs from 'node:fs';
-import {startDownload} from './download.js';
+import {startDownload,ffmpegFailure} from './download.js';
 import {fileAction} from './file-actions.js';
+import {youtubeInfo} from './youtube-download.js';
 const config = JSON.parse(fs.readFileSync(new URL('./config.json',import.meta.url),'utf8').replace(/^\uFEFF/,''));
 if (!config.allowedOrigins.includes(process.argv[2])) process.exit(1);
 function send(message) {
@@ -17,6 +18,11 @@ process.stdin.on('data',chunk => {
     const payload = buffered.subarray(4,4+length); buffered = buffered.subarray(4+length);
     let msg; try {msg = JSON.parse(payload);} catch {send({type:'error',error:'无效请求'}); continue;}
     if(msg.type === 'ping') {send({type:'ready'}); continue;}
+    if(msg.type==='youtube_info' && !busy) {
+      busy=true;
+      youtubeInfo(config,msg.url,ffmpegFailure).then(media=>send({ok:true,media}),error=>send({ok:false,error:error.message})).finally(()=>{busy=false;if(closing)process.exit(0);});
+      continue;
+    }
     if(msg.type==='file_action' && !busy) {
       busy=true;
       fileAction(msg).then(send,error=>send({ok:false,error:error.message})).finally(()=>{busy=false;if(closing)process.exit(0);});
@@ -27,7 +33,7 @@ process.stdin.on('data',chunk => {
     busy = true; cancelled=false;
     startDownload(config,msg,reply => {send(reply); if(['done','error'].includes(reply.type)) busy=false;})
       .then(stop => {cancel=stop; if(closing || cancelled) cancel();})
-      .catch(() => {busy=false; send({type:'error',error:'无法开始下载，请检查地址及本地助手配置。'});});
+      .catch(error => {busy=false; send({type:'error',error:ffmpegFailure(error.message,error.code,'下载任务')});});
   }
 });
 process.stdin.on('end',() => {closing=true; cancel?.(); if(!busy) process.exit(0);});

@@ -93,3 +93,10 @@ test('History clear button removes ended records, keeps current tasks and disabl
   assert.equal(document.querySelectorAll('.history-item').length,1);
   assert.equal(document.querySelector('.history-item').dataset.job,'current');assert.equal(button.disabled,true);
 });
+
+test('YouTube quality selection is submitted through the plugin download button',async()=>{
+ let submitted;const url='https://www.youtube.com/watch?v=6l7ble9P74o';
+ const {document}=await panel([],[{id:'yt',title:'YouTube sample',url,pageUrl:url,kind:'youtube',variants:[{url,height:1080},{url,height:720}]}],async job=>{submitted=job;return {job:{...job,id:'started',status:'starting'}};});
+ const select=document.querySelector('.quality');for(const option of select.querySelectorAll('option'))option.selected=option.value==='1';select.dispatchEvent(new document.defaultView.Event('change'));
+ document.querySelector('.download-btn').click();await new Promise(r=>setTimeout(r,20));assert.equal(submitted.kind,'youtube');assert.equal(submitted.height,720);assert.equal(submitted.pageUrl,url);
+});

@@ -100,3 +100,27 @@ test('Player evidence groups raw video/audio requests and survives later track r
   h.request('https://cdn.test/video');h.request('https://cdn.test/audio');await new Promise(r=>setTimeout(r,40));
   assert.equal(h.rows().length,1);assert.equal(h.rows()[0].kind,'paired');assert.equal(h.rows()[0].variants[0].audioUrl,'https://cdn.test/audio');
 });
+
+const youtubeId='YzI6-emjbMA',youtubeUrl='https://www.youtube.com/watch?v='+youtubeId;
+const youtubeReply=height=>({ok:true,media:{videoId:youtubeId,title:'Current video',duration:120,heights:[height]}});
+test('YouTube discovery lists real qualities without observing any HLS request',async()=>{
+ let requests=0;const h=harness(()=>{throw Error('No browser HLS fetch expected');});h.chrome.tabs.get=async()=>({url:youtubeUrl});
+ h.chrome.runtime.sendNativeMessage=async()=>{requests++;return youtubeReply(720);};
+ h.chrome.runtime.onMessage.emit({type:'GET_VIDEOS',tabId:1},{id:'test'},()=>{});await until(()=>h.rows()[0]?.parsed);
+ assert.equal(h.rows()[0].kind,'youtube');assert.equal(h.rows()[0].variants[0].height,720);assert.equal(requests,1);
+ h.request('https://manifest.googlevideo.com/old.m3u8','application/vnd.apple.mpegurl');await new Promise(r=>setTimeout(r,30));assert.equal(h.rows().length,1);
+});
+test('Manual YouTube rescan refreshes cached qualities',async()=>{
+ const h=harness();h.chrome.tabs.get=async()=>({url:youtubeUrl});let height=720;h.chrome.runtime.sendNativeMessage=async()=>youtubeReply(height);
+ h.chrome.runtime.onMessage.emit({type:'GET_VIDEOS',tabId:1},{id:'test'},()=>{});await until(()=>h.rows()[0]?.parsed);await new Promise(r=>setTimeout(r,20));height=1080;
+ h.chrome.runtime.onMessage.emit({type:'RESOLVE_YOUTUBE',tabId:1},{id:'test',url:'chrome-extension://test/sidepanel/sidepanel.html'},()=>{});await until(()=>h.rows()[0]?.variants[0].height===1080);
+});
+test('Navigation discards a native metadata response for the previous video',async()=>{
+ let release;const h=harness();h.chrome.tabs.get=async()=>({url:youtubeUrl});h.chrome.runtime.sendNativeMessage=()=>new Promise(resolve=>release=()=>resolve(youtubeReply(1080)));
+ h.chrome.runtime.onMessage.emit({type:'GET_VIDEOS',tabId:1},{id:'test'},()=>{});await until(()=>!!release);
+ h.chrome.tabs.get=async()=>({url:'https://www.youtube.com/watch?v=abcdefghijk'});h.chrome.tabs.onUpdated.emit(1,{url:'https://www.youtube.com/watch?v=abcdefghijk'});await new Promise(r=>setTimeout(r,10));release();await new Promise(r=>setTimeout(r,30));assert.equal(h.rows().length,0);
+});
+test('Missing native helper is shown as a specific discovery error',async()=>{
+ const h=harness();h.chrome.tabs.get=async()=>({url:youtubeUrl});h.chrome.runtime.sendNativeMessage=async()=>{throw Error('Native host not found');};
+ h.chrome.runtime.onMessage.emit({type:'GET_VIDEOS',tabId:1},{id:'test'},()=>{});await until(()=>h.messages.some(m=>/Native host not found/.test(m.mediaNotice||'')));assert.equal(h.rows().length,0);
+});

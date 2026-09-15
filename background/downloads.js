@@ -55,7 +55,7 @@ export class DownloadManager {
   }
   start(input) {
     return this.run(async()=>{
-      if(!['file','hls','dash','paired'].includes(input.kind) || !/^https?:$/.test(new URL(input.url).protocol)) throw new Error('无效的媒体地址');
+      if(!['file','hls','dash','paired','youtube'].includes(input.kind) || !/^https?:$/.test(new URL(input.url).protocol)) throw new Error('无效的媒体地址');
       if(input.kind==='paired' && (!input.audioUrl || !/^https?:$/.test(new URL(input.audioUrl).protocol)))throw new Error('缺少有效音轨地址');
       const existing=this.rows.find(r=>input.mediaId && r.mediaId===input.mediaId && active(r));
       if(existing) return structuredClone(existing);
@@ -87,7 +87,7 @@ export class DownloadManager {
       if(msg.type==='started' && row.status!=='cancelling') row.status='downloading';
       if(msg.type==='progress' && row.status!=='cancelling') {
         row.seconds=Math.max(row.seconds,positive(msg.seconds) || 0);row.bytes=Math.max(row.bytes,positive(msg.bytes) || 0);
-        row.speed=positive(msg.speed);row.percent=row.duration ? Math.min(99,Math.floor(row.seconds/row.duration*100)) : null;
+        row.speed=positive(msg.speed);row.percent=!msg.indeterminate && row.duration ? Math.min(99,Math.floor(row.seconds/row.duration*100)) : null;
         row.status=row.duration && row.seconds>=row.duration ? 'finalizing' : 'downloading';
       }
       if(msg.type==='done') Object.assign(row,{status:'complete',percent:100,path:msg.path,bytes:positive(msg.bytes) || row.bytes});

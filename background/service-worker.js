@@ -4329,7 +4329,7 @@ var DownloadManager = class {
   }
   start(input) {
     return this.run(async () => {
-      if (!["file", "hls", "dash", "paired"].includes(input.kind) || !/^https?:$/.test(new URL(input.url).protocol)) throw new Error("\u65E0\u6548\u7684\u5A92\u4F53\u5730\u5740");
+      if (!["file", "hls", "dash", "paired", "youtube"].includes(input.kind) || !/^https?:$/.test(new URL(input.url).protocol)) throw new Error("\u65E0\u6548\u7684\u5A92\u4F53\u5730\u5740");
       if (input.kind === "paired" && (!input.audioUrl || !/^https?:$/.test(new URL(input.audioUrl).protocol))) throw new Error("\u7F3A\u5C11\u6709\u6548\u97F3\u8F68\u5730\u5740");
       const existing = this.rows.find((r) => input.mediaId && r.mediaId === input.mediaId && active(r));
       if (existing) return structuredClone(existing);
@@ -4385,7 +4385,7 @@ var DownloadManager = class {
         row.seconds = Math.max(row.seconds, positive(msg.seconds) || 0);
         row.bytes = Math.max(row.bytes, positive(msg.bytes) || 0);
         row.speed = positive(msg.speed);
-        row.percent = row.duration ? Math.min(99, Math.floor(row.seconds / row.duration * 100)) : null;
+        row.percent = !msg.indeterminate && row.duration ? Math.min(99, Math.floor(row.seconds / row.duration * 100)) : null;
         row.status = row.duration && row.seconds >= row.duration ? "finalizing" : "downloading";
       }
       if (msg.type === "done") Object.assign(row, { status: "complete", percent: 100, path: msg.path, bytes: positive(msg.bytes) || row.bytes });
@@ -4462,7 +4462,56 @@ function playerMedia(item, frameId) {
   };
 }
 
+// background/youtube.js
+function youtubeId(value) {
+  try {
+    const u = new URL(value);
+    if (u.protocol !== "https:" || !["www.youtube.com", "youtube.com", "m.youtube.com"].includes(u.hostname)) return null;
+    const id = u.pathname === "/watch" ? u.searchParams.get("v") : /^\/(shorts|embed)\/([^/]+)\/?$/.exec(u.pathname)?.[2];
+    return /^[A-Za-z0-9_-]{11}$/.test(id || "") ? id : null;
+  } catch {
+    return null;
+  }
+}
+function createYoutubeResolver(api) {
+  return async (pageUrl) => {
+    const id = youtubeId(pageUrl);
+    if (!id) throw new Error("\u4E0D\u662F\u6709\u6548\u7684 YouTube \u89C6\u9891\u5730\u5740\u3002");
+    const url = `https://www.youtube.com/watch?v=${id}`;
+    let timer, reply;
+    try {
+      reply = await Promise.race([api.runtime.sendNativeMessage("com.any_video_download.helper", { type: "youtube_info", url }), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("\u672C\u5730\u52A9\u624B\u672A\u5728 50 \u79D2\u5185\u8FD4\u56DE\u89C6\u9891\u4FE1\u606F\uFF0C\u8BF7\u68C0\u67E5\u52A9\u624B\u7248\u672C\u3002")), 5e4);
+      })]);
+    } catch (error) {
+      throw new Error("YouTube \u672C\u5730\u89E3\u6790\u5931\u8D25\uFF1A" + error.message);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!reply?.ok) throw new Error(reply?.error || "\u672C\u5730\u52A9\u624B\u672A\u8FD4\u56DE\u89C6\u9891\u4FE1\u606F\uFF0C\u8BF7\u66F4\u65B0\u672C\u5730\u52A9\u624B\u3002");
+    const media = reply.media;
+    if (media?.videoId !== id || !Array.isArray(media.heights)) throw new Error("\u672C\u5730\u52A9\u624B\u8FD4\u56DE\u7684\u89C6\u9891\u4FE1\u606F\u4E0D\u5339\u914D\u3002");
+    const heights = [...new Set(media.heights.filter((h) => Number.isInteger(h) && h > 0 && h <= 8640))].sort((a, b) => b - a);
+    if (!heights.length) throw new Error("\u5F53\u524D\u89C6\u9891\u6CA1\u6709\u53EF\u4E0B\u8F7D\u7684 MP4 \u6E05\u6670\u5EA6\u3002");
+    return {
+      url,
+      pageUrl: url,
+      kind: "youtube",
+      siteVideoId: id,
+      title: String(media.title || "YouTube \u89C6\u9891").slice(0, 300),
+      duration: Number(media.duration) > 0 ? Number(media.duration) : null,
+      variants: heights.map((height) => ({ url, height })),
+      related: [],
+      segments: [],
+      parsed: true,
+      error: null
+    };
+  };
+}
+
 // background/main.js
+var resolveYoutube = createYoutubeResolver(chrome);
+var youtubeAttempts = /* @__PURE__ */ new Map();
 var downloads = new DownloadManager(chrome);
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
 var queues = /* @__PURE__ */ new Map();
@@ -4485,7 +4534,7 @@ async function publish(id, value) {
   await chrome.storage.session.set({ [key(id)]: value });
   await chrome.action.setBadgeText({ tabId: id, text: value.videos.length ? String(value.videos.length) : "" }).catch(() => {
   });
-  chrome.runtime.sendMessage({ type: "VIDEO_FOUND", tabId: id, videos: value.videos, players: value.players || [] }).catch(() => {
+  chrome.runtime.sendMessage({ type: "VIDEO_FOUND", tabId: id, videos: value.videos, players: value.players || [], mediaNotice: value.mediaNotice || "" }).catch(() => {
   });
 }
 async function reset(id, pageUrl) {
@@ -4533,13 +4582,14 @@ async function discover(tabId, candidate) {
   inFlight.set(token, flight);
   try {
     const tab = await chrome.tabs.get(tabId);
+    if (youtubeId(tab.url)) return;
     let epoch, needsParse = false;
     await serial(tabId, async () => {
       const s = await state(tabId);
       epoch = s.epoch;
       flight.epoch = epoch;
       const old = s.videos.find((v) => v.url === candidate.url);
-      if (old?.siteVideoId) return;
+      if (old?.siteVideoId && !candidate.siteVideoId) return;
       if (old?.kind && candidate.type === "video/unknown") {
         kind = old.kind;
         candidate.type = old.type;
@@ -4597,6 +4647,46 @@ async function discover(tabId, candidate) {
     if (flight.queued && (await state(tabId)).epoch === flight.epoch) discover(tabId, flight.queued);
   }
 }
+async function discoverYoutube(tabId, force = false) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null), videoId = youtubeId(tab?.url);
+  if (!videoId) return;
+  const before = await state(tabId), previous = youtubeAttempts.get(tabId);
+  if (!force && before.videos.some((v) => v.siteVideoId === videoId && v.kind === "youtube" && v.parsed && !v.error)) return;
+  if (previous?.videoId === videoId && (previous.busy || !force && Date.now() - previous.at < 6e4)) return;
+  const attempt = { videoId, busy: true, at: Date.now() };
+  youtubeAttempts.set(tabId, attempt);
+  const epoch = before.epoch;
+  const valid = async () => youtubeAttempts.get(tabId) === attempt && (await state(tabId)).epoch === epoch && youtubeId((await chrome.tabs.get(tabId).catch(() => null))?.url) === videoId;
+  try {
+    await serial(tabId, async () => {
+      if (!await valid()) return;
+      const s2 = await state(tabId);
+      s2.mediaNotice = "\u6B63\u5728\u8BFB\u53D6 YouTube \u89C6\u9891\u548C\u6E05\u6670\u5EA6\u2026";
+      await publish(tabId, s2);
+    });
+    const media = await resolveYoutube(tab.url);
+    if (!await valid()) return;
+    const s = await state(tabId), p = s.players?.find((p2) => p2.frameId === 0 && p2.visible && Math.abs(p2.duration - media.duration) < 2);
+    await serial(tabId, async () => {
+      if (!await valid()) return;
+      const current = await state(tabId);
+      const old = current.videos.find((v) => v.siteVideoId === videoId);
+      current.videos = [{ ...media, id: old?.id || crypto.randomUUID(), timestamp: Date.now(), frameId: 0, playerSrc: p?.src }];
+      current.mediaNotice = "";
+      await publish(tabId, current);
+    });
+  } catch (error) {
+    await serial(tabId, async () => {
+      if (!await valid()) return;
+      const s = await state(tabId);
+      s.mediaNotice = error.message;
+      await publish(tabId, s);
+    });
+  } finally {
+    attempt.busy = false;
+    attempt.at = Date.now();
+  }
+}
 async function refreshPlayer(tabId, frameId) {
   const s = await state(tabId);
   for (const row of s.videos.filter((v) => ["hls", "dash"].includes(v.kind) && (v.frameId || 0) === frameId).slice(-20)) {
@@ -4625,7 +4715,16 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     return true;
   }
   if (msg.type === "GET_VIDEOS") {
-    state(msg.tabId).then((s) => reply({ videos: s.videos, players: s.players || [] }));
+    state(msg.tabId).then((s) => reply({ videos: s.videos, players: s.players || [], mediaNotice: s.mediaNotice || "" }));
+    if (Number.isInteger(msg.tabId)) discoverYoutube(msg.tabId).catch(console.error);
+    return true;
+  }
+  if (msg.type === "RESOLVE_YOUTUBE" && isExtensionPage(sender, chrome.runtime.id) && Number.isInteger(msg.tabId)) {
+    chrome.tabs.get(msg.tabId).then((tab) => {
+      const youtube = !!youtubeId(tab.url);
+      if (youtube) discoverYoutube(msg.tabId, true).catch(console.error);
+      reply({ ok: true, youtube });
+    }, () => reply({ ok: false }));
     return true;
   }
   if (msg.type === "CLEAR_VIDEOS") {
@@ -4671,7 +4770,12 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         reportedAt: now
       }));
       s.players = [...(s.players || []).filter((p) => p.frameId !== frameId && now - p.reportedAt < 15e3), ...incoming];
+      const yt = youtubeId(sender.tab.url);
+      for (const row of s.videos.filter((v) => yt && v.siteVideoId === yt && v.frameId === frameId)) {
+        row.playerSrc = incoming.find((p) => p.visible && Math.abs(p.duration - row.duration) < 2)?.src;
+      }
       await publish(sender.tab.id, s);
+      if (frameId === 0) discoverYoutube(sender.tab.id).catch(console.error);
     }).catch(console.error);
     return;
   }
@@ -4694,4 +4798,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 chrome.tabs.onUpdated.addListener((id, change) => {
   if (change.url) reset(id, change.url);
 });
-chrome.tabs.onRemoved.addListener((id) => serial(id, () => chrome.storage.session.remove(key(id))));
+chrome.tabs.onRemoved.addListener((id) => {
+  youtubeAttempts.delete(id);
+  serial(id, () => chrome.storage.session.remove(key(id)));
+});

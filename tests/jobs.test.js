@@ -97,3 +97,12 @@ test('Clearing history persists removal of ended jobs while keeping an active do
   const restored=await new mod.DownloadManager(api(data)).list();
   assert.deepEqual(restored.map(r=>r.id),[running.id]);
 });
+
+test('YouTube byte progress stays indeterminate until the merged file is complete',async()=>{
+ const chrome=api(),manager=new mod.DownloadManager(chrome);
+ await manager.start({url:'https://cdn.test/a',kind:'hls',duration:58,title:'YouTube'});
+ chrome.ports[0].onMessage.emit({type:'progress',seconds:0,bytes:1024,indeterminate:true});
+ let row=(await manager.list())[0];assert.equal(row.percent,null);assert.equal(row.bytes,1024);assert.equal(row.status,'downloading');
+ chrome.ports[0].onMessage.emit({type:'done',path:'C:/Downloads/merged.mp4',bytes:2048});
+ row=(await manager.list())[0];assert.equal(row.percent,100);assert.equal(row.status,'complete');
+});

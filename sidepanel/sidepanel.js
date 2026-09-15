@@ -119,7 +119,7 @@ function render() {
     return `<div class="video-item" data-id="${escape(v.id)}">
       ${v.poster ? `<img class="poster" src="${escape(v.poster)}" alt="视频封面" referrerpolicy="no-referrer">` : ''}
       <div class="video-info"><div class="video-name" title="${escape(v.title)}">${escape(v.title)}</div>
-        <div class="video-meta"><span class="badge">${escape(v.kind === 'file' ? '视频' : v.kind === 'paired' ? '音视频' : v.kind.toUpperCase())}</span>
+        <div class="video-meta"><span class="badge">${escape(v.kind === 'file' ? '视频' : v.kind === 'paired' ? '音视频' : v.kind === 'youtube' ? 'YouTube' : v.kind.toUpperCase())}</span>
         ${variants.length ? `<select class="quality" aria-label="清晰度" ${job?.active ? 'disabled' : ''}>${options}</select>` : ''}
         ${player?'<span class="badge">播放器</span>':''}
         <span class="size">${escape([duration(player?.duration || v.duration),v.kind === 'file' ? size(v.size) : '',v.live ? '直播' : ''].filter(Boolean).join(' · '))}</span></div>
@@ -155,12 +155,12 @@ async function download(video) {
 }
 async function load() {
   const requested = currentTabId; if(requested == null) return;
-  try {const result=await chrome.runtime.sendMessage({type:'GET_VIDEOS',tabId:requested}); if(currentTabId === requested){latest=result?.videos || [];playback=result?.players || [];render();}}
+  try {const result=await chrome.runtime.sendMessage({type:'GET_VIDEOS',tabId:requested}); if(currentTabId === requested){latest=result?.videos || [];playback=result?.players || [];notice(result?.mediaNotice || '');render();}}
   catch {content.textContent='扩展已更新，请关闭并重新打开侧栏。';}
 }
-function rescan() {if(currentTabId != null) chrome.tabs.sendMessage(currentTabId,{type:'RESCAN'}).catch(() => notice('当前网页尚未加载扫描脚本，请刷新视频网页后重试。'));}
+async function rescan() {if(currentTabId == null)return;const requested=currentTabId;let result;try{result=await chrome.runtime.sendMessage({type:'RESOLVE_YOUTUBE',tabId:requested});}catch{}if(result?.youtube)return;chrome.tabs.sendMessage(requested,{type:'RESCAN'}).catch(() => {if(currentTabId===requested)notice('网页扫描连接已失效，请刷新视频网页。');});}
 chrome.runtime.onMessage.addListener(msg => {
-  if(msg.type === 'VIDEO_FOUND' && msg.tabId === currentTabId){latest=msg.videos;playback=msg.players || [];if(view==='media')render();}
+  if(msg.type === 'VIDEO_FOUND' && msg.tabId === currentTabId){latest=msg.videos;playback=msg.players || [];if(view==='media'){notice(msg.mediaNotice || '');render();}}
   if(msg.type === 'DOWNLOADS_CHANGED')refreshRecords();
 });
 chrome.tabs.onActivated.addListener(async info => {currentTabId=info.tabId;latest=[];playback=[];render();await load();rescan();});
