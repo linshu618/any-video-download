@@ -12,10 +12,10 @@ export function youtubeArgs(config,job,workDir) {
   const height=Number(job.height);if(job.height!=null && (!Number.isInteger(height)||height<1||height>8640))throw new Error('无效的视频清晰度。');
   const filter=height?`[height=${height}]`:'';
   return ['--ignore-config','--no-playlist','--no-simulate','--no-overwrites','--no-colors','--encoding','utf-8','--newline','--progress','--progress-delta','0.5',
-    '--socket-timeout','20','--retries','2','--fragment-retries','2',
+    '--socket-timeout','20','--retries','5','--fragment-retries','5','--force-ipv4',
     '--js-runtimes',`node:${process.execPath}`,'--ffmpeg-location',path.dirname(config.ffmpeg),
     '--progress-template','download:avd:%(info.format_id)s:%(progress.downloaded_bytes)s',
-    '-f',`bv${filter}[ext=mp4]+ba[ext=m4a]/b${filter}[ext=mp4]`,
+    '-f',`bv${filter}[protocol^=m3u8]+ba[protocol^=m3u8]/bv${filter}[ext=mp4]+ba[ext=m4a]/bv${filter}+ba/b${filter}[ext=mp4]/b${filter}`,
     '--merge-output-format','mp4','--remux-video','mp4','-o',path.join(workDir,'video.%(ext)s').replaceAll('%(ext)s','__AVD_EXT__').replaceAll('%','%%').replace('__AVD_EXT__','%(ext)s'),url];
 }
 export function youtubeProgress(notify) {
@@ -61,7 +61,7 @@ export async function startYoutubeDownload(config,job,output,notify,formatError,
 export async function youtubeInfo(config,pageUrl,formatError,launch=spawn) {
   const url=youtubePage(pageUrl);if(!url)throw new Error('无效的 YouTube 视频地址。');
   if(!config.ytDlp)throw new Error('YouTube 下载器尚未配置，请更新本地助手。');
-  const args=['--ignore-config','--no-playlist','--skip-download','--dump-single-json','--no-progress','--no-colors','--encoding','utf-8','--socket-timeout','15','--retries','1','--js-runtimes',`node:${process.execPath}`,url];
+  const args=['--ignore-config','--no-playlist','--skip-download','--dump-single-json','--no-progress','--no-colors','--encoding','utf-8','--socket-timeout','15','--retries','2','--force-ipv4','--js-runtimes',`node:${process.execPath}`,url];
   return new Promise((resolve,reject)=>{
     const child=launch(config.ytDlp,args,{windowsHide:true,stdio:['ignore','pipe','pipe']});let stdout='',stderr='',settled=false;
     child.stdout.setEncoding?.('utf8');child.stderr.setEncoding?.('utf8');
@@ -77,9 +77,10 @@ export async function youtubeInfo(config,pageUrl,formatError,launch=spawn) {
         const data=JSON.parse(stdout);if(data.id!==new URL(url).searchParams.get('v'))throw new Error('解析结果与当前视频不一致。');
         if(data.is_live || data.live_status==='is_upcoming')throw new Error('YouTube 直播或尚未开始的视频暂不支持下载。');
         const formats=Array.isArray(data.formats)?data.formats:[];
-        const hasAudio=formats.some(f=>!f.has_drm && f.ext==='m4a' && f.acodec && f.acodec!=='none');
-        const heights=[...new Set(formats.filter(f=>!f.has_drm && f.ext==='mp4' && f.vcodec && f.vcodec!=='none' && (hasAudio || f.acodec && f.acodec!=='none')).map(f=>Number(f.height)).filter(h=>Number.isInteger(h)&&h>0&&h<=8640))].sort((a,b)=>b-a);
-        if(!heights.length)throw new Error('解析器没有返回带音轨的可下载 MP4 清晰度。');
+        const usable=formats.filter(f=>!f.has_drm);
+        const hasAudio=usable.some(f=>f.acodec && f.acodec!=='none');
+        const heights=[...new Set(usable.filter(f=>f.vcodec && f.vcodec!=='none' && (hasAudio || (f.acodec && f.acodec!=='none'))).map(f=>Number(f.height)).filter(h=>Number.isInteger(h)&&h>0&&h<=8640))].sort((a,b)=>b-a);
+        if(!heights.length)throw new Error('解析器没有返回带音轨的可下载清晰度。');
         finish(null,{videoId:data.id,title:String(data.title || 'YouTube 视频').slice(0,300),duration:Number(data.duration)>0?Number(data.duration):null,heights});
       }catch(error){finish(new Error(error instanceof SyntaxError?'YouTube 解析器返回了无效 JSON。':error.message));}
     });

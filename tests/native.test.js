@@ -25,6 +25,7 @@ test('DASH selects the requested resolution rather than always the first stream'
 test('FFmpeg failures report evidence instead of speculative causes',()=>{
   assert.equal(typeof native.ffmpegFailure,'function');
   assert.match(native.ffmpegFailure('HTTP error 403 Forbidden',1),/HTTP 403/);
+  assert.match(native.ffmpegFailure('HTTP Error 403: Forbidden',1,'YouTube 下载器'),/YouTube 拒绝了媒体请求/);
   assert.match(native.ffmpegFailure('Connection timed out',1),/超时/);
   assert.match(native.ffmpegFailure("Protocol 'httpproxy' not on whitelist 'http,https'",1),/httpproxy/);
   const text=native.ffmpegFailure("Error when loading first segment 'https://cdn.test/secret?token=abc'\nError opening input: Invalid data found when processing input",1);

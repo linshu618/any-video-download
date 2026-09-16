@@ -21,7 +21,11 @@ export function ffmpegFailure(stderr,code,tool='FFmpeg') {
     .replace(/\[[^\]\r\n]* @ [^\]\r\n]*\]\s*/g,'').trim();
   const segment=/segment/i.test(clean);
   const http=/(?:HTTP (?:error\s+)?|Server returned\s+)([45]\d\d)\b/i.exec(clean);
-  if(http)return (segment?'媒体分片请求失败':'媒体请求失败')+'：服务器返回 HTTP '+http[1]+(http[1]==='403'?' Forbidden':http[1]==='401'?' Unauthorized':'')+'。';
+  if(http){
+    const status=http[1]==='403'?' Forbidden':http[1]==='401'?' Unauthorized':'';
+    if(http[1]==='403' && tool==='YouTube 下载器')return 'YouTube 拒绝了媒体请求（HTTP 403）。当前清晰度可能需要登录，或下载器版本过旧、网络被限制。请更新 yt-dlp 后重试，或换一条公开视频。';
+    return (segment?'媒体分片请求失败':'媒体请求失败')+'：服务器返回 HTTP '+http[1]+status+'。';
+  }
   const protocol=/Protocol '([a-z0-9+_.-]+)' not on whitelist/i.exec(clean);
   if(protocol)return tool+' 拒绝使用 '+protocol[1]+' 协议：该协议未在允许列表中。';
   if(/timed? out|timeout/i.test(clean))return tool+' 网络读写超时。';
