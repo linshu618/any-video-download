@@ -144,7 +144,7 @@ chrome.runtime.onMessage.addListener((msg,sender,reply) => {
   if(msg.type === 'CLEAR_VIDEOS') {reset(msg.tabId).then(() => reply({ok:true})); return true;}
   if(msg.type==='PLAYER_MEDIA' && sender.tab) {
     let origin;try{origin=new URL(sender.url || sender.origin);}catch{return;}
-    if(!/(^|\.)douyin\.com$/.test(origin.hostname))return;
+    if(!/(^|\.)(douyin|bilibili)\.com$/.test(origin.hostname))return;
     serial(sender.tab.id,async()=>{
       const s=await state(sender.tab.id),frameId=sender.frameId || 0;
       for(const input of (Array.isArray(msg.items)?msg.items:[]).slice(0,5)) {

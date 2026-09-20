@@ -4741,7 +4741,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     } catch {
       return;
     }
-    if (!/(^|\.)douyin\.com$/.test(origin.hostname)) return;
+    if (!/(^|\.)(douyin|bilibili)\.com$/.test(origin.hostname)) return;
     serial(sender.tab.id, async () => {
       const s = await state(sender.tab.id), frameId = sender.frameId || 0;
       for (const input of (Array.isArray(msg.items) ? msg.items : []).slice(0, 5)) {

@@ -47,7 +47,10 @@
   // Throttle rather than debounce: continuous media requests must not starve the scan.
   function schedule(){if(pending===null)pending=setTimeout(scan,300);}
   if(typeof window!=='undefined')window.addEventListener('message',event=>{
-    if(event.source!==window || event.data?.channel!=='avd-douyin-player-v1' || !/(^|\.)douyin\.com$/.test(location.hostname))return;
+    if(event.source!==window)return;
+    const allowed=event.data?.channel==='avd-douyin-player-v1' && /(^|\.)douyin\.com$/.test(location.hostname)
+      || event.data?.channel==='avd-bilibili-player-v1' && /(^|\.)bilibili\.com$/.test(location.hostname);
+    if(!allowed)return;
     bridged=(Array.isArray(event.data.items)?event.data.items:[]).slice(0,5);bridgeAt=Date.now();schedule();
   });
   new MutationObserver(schedule).observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['src','poster']});

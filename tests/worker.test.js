@@ -102,6 +102,14 @@ test('Player evidence groups raw video/audio requests and survives later track r
 });
 
 const youtubeId='YzI6-emjbMA',youtubeUrl='https://www.youtube.com/watch?v='+youtubeId;
+test('Bilibili paired tracks reach the downloadable list without a playlist fetch',async()=>{
+ const h=harness(()=>{throw Error('No playlist needed');});
+ const sender={id:'test',tab:{id:1,url:'https://www.bilibili.com/video/BV13PYx6GEfY/'},url:'https://www.bilibili.com/video/BV13PYx6GEfY/',frameId:0};
+ const src='blob:https://www.bilibili.com/current';
+ h.chrome.runtime.onMessage.emit({type:'PLAYER_STATE',players:[{id:'p',src,duration:618,visible:true}]},sender,()=>{});
+ h.chrome.runtime.onMessage.emit({type:'PLAYER_MEDIA',items:[{siteVideoId:'41727952632',url:'https://cdn.bilivideo.com/video.m4s',kind:'paired',duration:618,playerSrc:src,title:'B站视频',variants:[{url:'https://cdn.bilivideo.com/video.m4s',audioUrl:'https://cdn.bilivideo.com/audio.m4s',height:1080}]}]},sender,()=>{});
+ await until(()=>h.rows().length===1);assert.equal(h.rows()[0].variants[0].height,1080);assert.equal(h.rows()[0].pageUrl,sender.tab.url);
+});
 const youtubeReply=height=>({ok:true,media:{videoId:youtubeId,title:'Current video',duration:120,heights:[height]}});
 test('YouTube discovery lists real qualities without observing any HLS request',async()=>{
  let requests=0;const h=harness(()=>{throw Error('No browser HLS fetch expected');});h.chrome.tabs.get=async()=>({url:youtubeUrl});

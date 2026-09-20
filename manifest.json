@@ -40,6 +40,12 @@
       ],
       "world": "MAIN",
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.bilibili.com/video/*"],
+      "js": ["content/bilibili-player.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
     }
   ],
   "action": {
