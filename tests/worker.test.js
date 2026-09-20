@@ -122,5 +122,5 @@ test('Navigation discards a native metadata response for the previous video',asy
 });
 test('Missing native helper is shown as a specific discovery error',async()=>{
  const h=harness();h.chrome.tabs.get=async()=>({url:youtubeUrl});h.chrome.runtime.sendNativeMessage=async()=>{throw Error('Native host not found');};
- h.chrome.runtime.onMessage.emit({type:'GET_VIDEOS',tabId:1},{id:'test'},()=>{});await until(()=>h.messages.some(m=>/Native host not found/.test(m.mediaNotice||'')));assert.equal(h.rows().length,0);
+ h.chrome.runtime.onMessage.emit({type:'GET_VIDEOS',tabId:1},{id:'test'},()=>{});await until(()=>h.messages.some(m=>/未找到本地助手/.test(m.mediaNotice||'')));assert.equal(h.rows().length,0);
 });

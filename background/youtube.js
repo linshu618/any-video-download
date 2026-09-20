@@ -10,7 +10,12 @@ export function createYoutubeResolver(api) {
     const url=`https://www.youtube.com/watch?v=${id}`;
     let timer,reply;
     try {reply=await Promise.race([api.runtime.sendNativeMessage('com.any_video_download.helper',{type:'youtube_info',url}),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('本地助手未在 50 秒内返回视频信息，请检查助手版本。')),50000);})]);}
-    catch(error){throw new Error('YouTube 本地解析失败：'+error.message);}
+    catch(error){
+      if (/\b(?:specified\s+)?native(?:\s+messaging)?\s+host\s+not\s+found\b/i.test(error.message || '')) {
+        throw new Error('未找到本地助手，暂时无法解析 YouTube 视频。请按项目 GUIDE.md 中“安装本地助手（Windows）”的说明完成安装；如果移动过项目目录，请重新运行安装脚本。');
+      }
+      throw new Error('YouTube 本地解析失败：'+error.message);
+    }
     finally{clearTimeout(timer);}
     if(!reply?.ok)throw new Error(reply?.error || '本地助手未返回视频信息，请更新本地助手。');
     const media=reply.media;if(media?.videoId!==id || !Array.isArray(media.heights))throw new Error('本地助手返回的视频信息不匹配。');

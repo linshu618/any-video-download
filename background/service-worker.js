@@ -4484,6 +4484,9 @@ function createYoutubeResolver(api) {
         timer = setTimeout(() => reject(new Error("\u672C\u5730\u52A9\u624B\u672A\u5728 50 \u79D2\u5185\u8FD4\u56DE\u89C6\u9891\u4FE1\u606F\uFF0C\u8BF7\u68C0\u67E5\u52A9\u624B\u7248\u672C\u3002")), 5e4);
       })]);
     } catch (error) {
+      if (/\b(?:specified\s+)?native(?:\s+messaging)?\s+host\s+not\s+found\b/i.test(error.message || "")) {
+        throw new Error("\u672A\u627E\u5230\u672C\u5730\u52A9\u624B\uFF0C\u6682\u65F6\u65E0\u6CD5\u89E3\u6790 YouTube \u89C6\u9891\u3002\u8BF7\u6309\u9879\u76EE GUIDE.md \u4E2D\u201C\u5B89\u88C5\u672C\u5730\u52A9\u624B\uFF08Windows\uFF09\u201D\u7684\u8BF4\u660E\u5B8C\u6210\u5B89\u88C5\uFF1B\u5982\u679C\u79FB\u52A8\u8FC7\u9879\u76EE\u76EE\u5F55\uFF0C\u8BF7\u91CD\u65B0\u8FD0\u884C\u5B89\u88C5\u811A\u672C\u3002");
+      }
       throw new Error("YouTube \u672C\u5730\u89E3\u6790\u5931\u8D25\uFF1A" + error.message);
     } finally {
       clearTimeout(timer);
