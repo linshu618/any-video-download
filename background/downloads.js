@@ -57,6 +57,7 @@ export class DownloadManager {
     return this.run(async()=>{
       if(!['file','hls','dash','paired','youtube'].includes(input.kind) || !/^https?:$/.test(new URL(input.url).protocol)) throw new Error('无效的媒体地址');
       if(input.kind==='paired' && (!input.audioUrl || !/^https?:$/.test(new URL(input.audioUrl).protocol)))throw new Error('缺少有效音轨地址');
+      if(input.wrapped!==undefined && !(input.wrapped==='png' && input.kind==='hls'))throw new Error('不支持的媒体封装格式');
       const existing=this.rows.find(r=>input.mediaId && r.mediaId===input.mediaId && active(r));
       if(existing) return structuredClone(existing);
       const row={id:crypto.randomUUID(),mediaId:input.mediaId,title:String(input.title || '视频').slice(0,300),kind:input.kind,

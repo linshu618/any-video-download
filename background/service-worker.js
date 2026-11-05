@@ -4132,6 +4132,82 @@ function classify(url, type = "") {
   if (/^video\//i.test(type) || /\.(mp4|webm|mov|mkv|m4v|ogv)$/i.test(path)) return "file";
   return null;
 }
+var PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
+var RO_UD = 1919898980;
+var IEND = 1229278788;
+function pngChunk(bytes) {
+  if (PNG_SIGNATURE.some((b, i) => i < bytes.length && bytes[i] !== b)) return { state: "plain" };
+  if (bytes.length < 8) return { state: "need" };
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let i = 8; i + 8 <= bytes.length; ) {
+    const size = view.getUint32(i), type = view.getUint32(i + 4), start = i + 8;
+    if (type === RO_UD) {
+      if (size < 1) return { state: "missing" };
+      if (start >= bytes.length) return { state: "need" };
+      return { state: "found", deflate: (bytes[start] & 1) === 1, start: start + 1, end: start + size, complete: start + size <= bytes.length };
+    }
+    if (type === IEND) return { state: "missing" };
+    i = start + size + 4;
+  }
+  return { state: "need" };
+}
+async function inflate(data, limit) {
+  const reader = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate")).getReader();
+  const chunks = [];
+  let length = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    length += value.length;
+    if (length > limit) {
+      await reader.cancel();
+      throw new Error("\u89E3\u5305\u540E\u7684\u64AD\u653E\u5217\u8868\u8FC7\u5927");
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+async function unwrapPng(bytes, limit = 16 * 1024 * 1024) {
+  const chunk = pngChunk(bytes);
+  if (chunk.state === "plain") return { bytes, wrapped: false };
+  if (chunk.state !== "found" || !chunk.complete) throw new Error("PNG \u5305\u88C5\u7684\u5A92\u4F53\u7F3A\u5C11\u6570\u636E\u5757");
+  const data = bytes.subarray(chunk.start, chunk.end);
+  return { bytes: chunk.deflate ? await inflate(data, limit) : data, wrapped: true };
+}
+async function wrappedPlaylist(response, limit = 4 * 1024 * 1024) {
+  const reader = response.body.getReader();
+  let bytes = new Uint8Array(0);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (value) {
+        const next = new Uint8Array(bytes.length + value.length);
+        next.set(bytes);
+        next.set(value, bytes.length);
+        bytes = next;
+      }
+      if (bytes.length > limit) return false;
+      const chunk = pngChunk(bytes);
+      if (["plain", "missing"].includes(chunk.state)) return false;
+      if (chunk.state === "found" && !chunk.deflate && bytes.length >= chunk.start + 7)
+        return new TextDecoder().decode(bytes.subarray(chunk.start, chunk.start + 7)) === "#EXTM3U";
+      if (chunk.state === "found" && chunk.deflate && chunk.complete)
+        return new TextDecoder().decode((await unwrapPng(bytes)).bytes).trimStart().startsWith("#EXTM3U");
+      if (done) return false;
+    }
+  } catch {
+    return false;
+  } finally {
+    reader.cancel().catch(() => {
+    });
+  }
+}
 function attrs(line) {
   const result = {};
   for (const m of line.slice(line.indexOf(":") + 1).matchAll(/([\w-]+)=(?:"([^"]*)"|([^,]*))/g)) result[m[1]] = m[2] ?? m[3];
@@ -4331,6 +4407,7 @@ var DownloadManager = class {
     return this.run(async () => {
       if (!["file", "hls", "dash", "paired", "youtube"].includes(input.kind) || !/^https?:$/.test(new URL(input.url).protocol)) throw new Error("\u65E0\u6548\u7684\u5A92\u4F53\u5730\u5740");
       if (input.kind === "paired" && (!input.audioUrl || !/^https?:$/.test(new URL(input.audioUrl).protocol))) throw new Error("\u7F3A\u5C11\u6709\u6548\u97F3\u8F68\u5730\u5740");
+      if (input.wrapped !== void 0 && !(input.wrapped === "png" && input.kind === "hls")) throw new Error("\u4E0D\u652F\u6301\u7684\u5A92\u4F53\u5C01\u88C5\u683C\u5F0F");
       const existing = this.rows.find((r) => input.mediaId && r.mediaId === input.mediaId && active(r));
       if (existing) return structuredClone(existing);
       const row = {
@@ -4568,7 +4645,27 @@ async function playlist(url, kind) {
     bytes.set(chunk, offset);
     offset += chunk.length;
   }
-  return (kind === "hls" ? parseHls : parseDash)(new TextDecoder().decode(bytes), response.url);
+  const body = await unwrapPng(bytes);
+  const parsed = (kind === "hls" ? parseHls : parseDash)(new TextDecoder().decode(body.bytes), response.url);
+  if (body.wrapped) parsed.wrapped = "png";
+  return parsed;
+}
+var probed = /* @__PURE__ */ new Map();
+async function probeWrapped(tabId, url, frameId) {
+  let seen = probed.get(tabId);
+  if (!seen) probed.set(tabId, seen = /* @__PURE__ */ new Set());
+  if (seen.has(url)) return;
+  if (seen.size > 2e3) seen.clear();
+  seen.add(url);
+  const s = await state(tabId);
+  if (s.videos.some((v) => v.url === url || v.segments?.includes(url))) return;
+  try {
+    const response = await fetch(url, { credentials: "include", signal: AbortSignal.timeout(15e3) });
+    if (!response.ok || !await wrappedPlaylist(response)) return;
+  } catch {
+    return;
+  }
+  discover(tabId, { url, kind: "hls", frameId, type: "application/vnd.apple.mpegurl" });
 }
 async function discover(tabId, candidate) {
   candidate = Object.fromEntries(Object.entries(candidate).filter(([, value]) => value !== void 0));
@@ -4701,7 +4798,13 @@ chrome.webRequest.onResponseStarted.addListener((details) => {
   const header = (name) => details.responseHeaders?.find((h) => h.name.toLowerCase() === name)?.value;
   const type = header("content-type") || "";
   const kind = classify(details.url, type);
-  if (!kind) return;
+  if (!kind) {
+    const length = Number(header("content-length"));
+    if (details.type === "xmlhttprequest" && /^image\/png\b/i.test(type) && !(length > 4 * 1024 * 1024))
+      probeWrapped(details.tabId, details.url, details.frameId || 0).catch(() => {
+      });
+    return;
+  }
   const total = /\/(\d+)$/.exec(header("content-range") || "")?.[1];
   const size = total || (details.statusCode === 206 ? null : header("content-length"));
   discover(details.tabId, { url: details.url, type, kind, frameId: details.frameId || 0, size: size ? Number(size) : null });
@@ -4799,9 +4902,13 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   }
 });
 chrome.tabs.onUpdated.addListener((id, change) => {
-  if (change.url) reset(id, change.url);
+  if (change.url) {
+    probed.delete(id);
+    reset(id, change.url);
+  }
 });
 chrome.tabs.onRemoved.addListener((id) => {
   youtubeAttempts.delete(id);
+  probed.delete(id);
   serial(id, () => chrome.storage.session.remove(key(id)));
 });

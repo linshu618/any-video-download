@@ -49,6 +49,25 @@ test('A 36-minute blob player is shown as unmatched rather than associated with 
   assert.match(document.body.textContent,/36:19/);
   assert.match(document.body.textContent,/尚未关联/);
 });
+test('A generic blob player is associated with the HLS stream whose duration matches',async()=>{
+  const now=Date.now();
+  const {document}=await panel([],[
+    {id:'ad',url:'https://cdn.test/ad.mp4',kind:'file',duration:15,timestamp:3},
+    {id:'other',url:'https://cdn.test/trailer.m3u8',kind:'hls',duration:120,timestamp:2,frameId:0},
+    {id:'main',url:'https://cdn.test/main.m3u8',kind:'hls',duration:2190.5,timestamp:1,frameId:-1}
+  ],undefined,[{src:'blob:https://site.test/main',duration:2192,visible:true,frameId:0,reportedAt:now}]);
+  assert.equal(document.querySelector('.video-item').dataset.id,'main');
+  assert.match(document.querySelector('.video-item').textContent,/播放器/);
+  assert.match(document.getElementById('playerStatus').textContent,/已关联下载条目/);
+  assert.doesNotMatch(document.querySelector('[data-id="other"]').textContent,/播放器/);
+});
+test('A live HLS stream or a stream from another frame is not tied to a blob player by duration',async()=>{
+  const {document}=await panel([],[
+    {id:'live',url:'https://cdn.test/live.m3u8',kind:'hls',duration:600,live:true,frameId:0},
+    {id:'frame',url:'https://cdn.test/frame.m3u8',kind:'hls',duration:600,frameId:3}
+  ],undefined,[{src:'blob:https://site.test/x',duration:600,visible:true,frameId:0,reportedAt:Date.now()}]);
+  assert.match(document.getElementById('playerStatus').textContent,/流式播放，尚未关联/);
+});
 test('Exact player source is prioritized over a newly detected unrelated media file',async()=>{
   const {document}=await panel([],[{id:'ad',url:'https://cdn.test/ad.mp4',title:'Ad',kind:'file',timestamp:2},{id:'main',url:'https://cdn.test/main.mp4',title:'Main',kind:'file',timestamp:1,frameId:0}],undefined,[{src:'https://cdn.test/main.mp4#t=2',duration:2179,visible:true,frameId:0,reportedAt:Date.now()}]);
   assert.equal(document.querySelector('.video-item').dataset.id,'main');

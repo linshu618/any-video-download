@@ -1,4 +1,4 @@
-import { classify, httpUrl, parseHls, parseDash, mergeMedia } from './media.js';
+import { classify, httpUrl, parseHls, parseDash, mergeMedia, unwrapPng, wrappedPlaylist } from './media.js';
 import { DownloadManager } from './downloads.js';
 import { isExtensionPage } from './sender.js';
 import { playerMedia } from './player-media.js';
@@ -36,7 +36,26 @@ async function playlist(url, kind) {
   }
   const bytes = new Uint8Array(length); let offset = 0;
   for (const chunk of chunks) {bytes.set(chunk,offset); offset += chunk.length;}
-  return (kind === 'hls' ? parseHls : parseDash)(new TextDecoder().decode(bytes),response.url);
+  const body = await unwrapPng(bytes);
+  const parsed = (kind === 'hls' ? parseHls : parseDash)(new TextDecoder().decode(body.bytes),response.url);
+  if (body.wrapped) parsed.wrapped = 'png';
+  return parsed;
+}
+const probed = new Map();
+// A PNG fetched by script (not an <img>) may be a disguised HLS playlist. Check each URL once per page.
+async function probeWrapped(tabId, url, frameId) {
+  let seen = probed.get(tabId);
+  if (!seen) probed.set(tabId, seen = new Set());
+  if (seen.has(url)) return;
+  if (seen.size > 2000) seen.clear();
+  seen.add(url);
+  const s = await state(tabId);
+  if (s.videos.some(v => v.url === url || v.segments?.includes(url))) return;
+  try {
+    const response = await fetch(url, {credentials:'include', signal:AbortSignal.timeout(15000)});
+    if (!response.ok || !await wrappedPlaylist(response)) return;
+  } catch { return; }
+  discover(tabId,{url,kind:'hls',frameId,type:'application/vnd.apple.mpegurl'});
 }
 async function discover(tabId, candidate) {
   candidate=Object.fromEntries(Object.entries(candidate).filter(([,value])=>value!==undefined));
@@ -123,7 +142,13 @@ chrome.webRequest.onResponseStarted.addListener(details => {
   if (details.tabId < 0 || details.statusCode >= 400) return;
   const header = name => details.responseHeaders?.find(h => h.name.toLowerCase() === name)?.value;
   const type = header('content-type') || '';
-  const kind = classify(details.url,type); if(!kind) return;
+  const kind = classify(details.url,type);
+  if(!kind) {
+    const length = Number(header('content-length'));
+    if(details.type === 'xmlhttprequest' && /^image\/png\b/i.test(type) && !(length > 4*1024*1024))
+      probeWrapped(details.tabId,details.url,details.frameId || 0).catch(() => {});
+    return;
+  }
   const total = /\/(\d+)$/.exec(header('content-range') || '')?.[1];
   const size = total || (details.statusCode === 206 ? null : header('content-length'));
   discover(details.tabId,{url:details.url,type,kind,frameId:details.frameId || 0,size:size ? Number(size) : null});
@@ -184,5 +209,5 @@ chrome.runtime.onMessage.addListener((msg,sender,reply) => {
     }
   }
 });
-chrome.tabs.onUpdated.addListener((id,change) => {if(change.url) reset(id,change.url);});
-chrome.tabs.onRemoved.addListener(id => {youtubeAttempts.delete(id);serial(id,() => chrome.storage.session.remove(key(id)));});
+chrome.tabs.onUpdated.addListener((id,change) => {if(change.url) {probed.delete(id);reset(id,change.url);}});
+chrome.tabs.onRemoved.addListener(id => {youtubeAttempts.delete(id);probed.delete(id);serial(id,() => chrome.storage.session.remove(key(id)));});

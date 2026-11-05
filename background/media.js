@@ -13,6 +13,65 @@ export function classify(url, type = '') {
   if (/^video\//i.test(type) || /\.(mp4|webm|mov|mkv|m4v|ogv)$/i.test(path)) return 'file';
   return null;
 }
+// Some sites serve HLS playlists and segments disguised as PNG images: the real bytes sit in a private "roUd" chunk
+// whose first byte is a flag (bit 0 = zlib/deflate compressed). This is a container, not encryption.
+const PNG_SIGNATURE = [137,80,78,71,13,10,26,10], RO_UD = 0x726f5564, IEND = 0x49454e44;
+export function pngChunk(bytes) {
+  if (PNG_SIGNATURE.some((b,i) => i < bytes.length && bytes[i] !== b)) return { state:'plain' };
+  if (bytes.length < 8) return { state:'need' };
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let i = 8; i + 8 <= bytes.length;) {
+    const size = view.getUint32(i), type = view.getUint32(i + 4), start = i + 8;
+    if (type === RO_UD) {
+      if (size < 1) return { state:'missing' };
+      if (start >= bytes.length) return { state:'need' };
+      return { state:'found', deflate:(bytes[start] & 1) === 1, start:start + 1, end:start + size, complete:start + size <= bytes.length };
+    }
+    if (type === IEND) return { state:'missing' };
+    i = start + size + 4;
+  }
+  return { state:'need' };
+}
+async function inflate(data, limit) {
+  const reader = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate')).getReader();
+  const chunks = []; let length = 0;
+  while (true) {
+    const { done, value } = await reader.read(); if (done) break;
+    length += value.length;
+    if (length > limit) { await reader.cancel(); throw new Error('解包后的播放列表过大'); }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(length); let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.length; }
+  return out;
+}
+export async function unwrapPng(bytes, limit = 16*1024*1024) {
+  const chunk = pngChunk(bytes);
+  if (chunk.state === 'plain') return { bytes, wrapped:false };
+  if (chunk.state !== 'found' || !chunk.complete) throw new Error('PNG 包装的媒体缺少数据块');
+  const data = bytes.subarray(chunk.start, chunk.end);
+  return { bytes:chunk.deflate ? await inflate(data, limit) : data, wrapped:true };
+}
+// Reads only as much of a PNG response as needed to tell whether it hides an HLS playlist; segments are
+// rejected after their first kilobytes.
+export async function wrappedPlaylist(response, limit = 4*1024*1024) {
+  const reader = response.body.getReader();
+  let bytes = new Uint8Array(0);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (value) { const next = new Uint8Array(bytes.length + value.length); next.set(bytes); next.set(value, bytes.length); bytes = next; }
+      if (bytes.length > limit) return false;
+      const chunk = pngChunk(bytes);
+      if (['plain','missing'].includes(chunk.state)) return false;
+      if (chunk.state === 'found' && !chunk.deflate && bytes.length >= chunk.start + 7)
+        return new TextDecoder().decode(bytes.subarray(chunk.start, chunk.start + 7)) === '#EXTM3U';
+      if (chunk.state === 'found' && chunk.deflate && chunk.complete)
+        return new TextDecoder().decode((await unwrapPng(bytes)).bytes).trimStart().startsWith('#EXTM3U');
+      if (done) return false;
+    }
+  } catch { return false; } finally { reader.cancel().catch(() => {}); }
+}
 function attrs(line) {
   const result = {};
   for (const m of line.slice(line.indexOf(':') + 1).matchAll(/([\w-]+)=(?:"([^"]*)"|([^,]*))/g)) result[m[1]] = m[2] ?? m[3];

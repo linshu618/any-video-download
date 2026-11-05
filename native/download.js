@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {progressReader} from './progress.js';
 import {youtubePage,startYoutubeDownload} from './youtube-download.js';
+import {startWrappedHls} from './wrapped-hls.js';
 export function safeName(value = 'video') {
   let name = String(value).split(/[\\/]/).pop().replace(/[<>:"|?*\x00-\x1f]/g,'_').replace(/\.(mp4|mkv|webm)$/i,'').replace(/[. ]+$/g,'').slice(0,120) || 'video';
   if (/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(name)) name = `_${name}`;
@@ -74,6 +75,7 @@ export async function startDownload(config,job,notify) {
   await fs.mkdir(config.downloadDir,{recursive:true});
   const output = path.join(config.downloadDir,`${safeName(job.title)}_${randomUUID().slice(0,8)}.mp4`);
   if(youtube)return startYoutubeDownload(config,job,output,notify,ffmpegFailure);
+  if(job.wrapped==='png' && job.kind==='hls')return startWrappedHls(config,job,output,notify,ffmpegFailure);
   const args = buildArgs(job,output);
   const child = spawn(config.ffmpeg,args,{windowsHide:true,stdio:['ignore','pipe','pipe']});
   let finished = false;

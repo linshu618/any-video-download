@@ -30,10 +30,16 @@ function directName(video) {
 function sourceKey(value) {
   try {const u=new URL(value);if(!/^https?:$/.test(u.protocol))return null;u.hash='';return u.href;}catch{return null;}
 }
+// MSE players (hls.js, shaka, dash.js…) expose only a blob: URL. A parsed, finished HLS/DASH manifest with the same
+// duration is the stream behind it. Worker-issued requests report frameId -1, so they cannot be tied to a frame.
+function streamFor(video,p) {
+  return p.src?.startsWith('blob:') && ['hls','dash'].includes(video.kind) && !video.live && video.duration>0 && p.duration>0 &&
+    Math.abs(video.duration-p.duration)<=Math.max(2,p.duration*0.005) && ((video.frameId || 0)<0 || (p.frameId || 0)===(video.frameId || 0));
+}
 function playerFor(video) {
   const urls=[video.url,...(video.related || [])].map(sourceKey).filter(Boolean);
-  return playback.find(p=>p.visible && Date.now()-p.reportedAt<15000 && (p.frameId || 0)===(video.frameId || 0) &&
-    (sourceKey(p.src) && urls.includes(sourceKey(p.src)) || video.playerSrc===p.src && Math.abs(video.duration-p.duration)<2));
+  return playback.find(p=>p.visible && Date.now()-p.reportedAt<15000 && ((p.frameId || 0)===(video.frameId || 0) &&
+    (sourceKey(p.src) && urls.includes(sourceKey(p.src)) || video.playerSrc===p.src && Math.abs(video.duration-p.duration)<2) || streamFor(video,p)));
 }
 function renderPlayers() {
   const node=document.getElementById('playerStatus');
@@ -145,7 +151,7 @@ async function download(video) {
   const variant = video.variants?.[Number(choices.get(video.id) || 0)];
   try {
     const result=await request({type:'START_DOWNLOAD',job:{mediaId:video.id,kind:video.kind,url:variant?.url || video.url,audioUrl:variant?.audioUrl,
-      height:variant?.height,title:name(video),filename:directName(video),duration:playerFor(video)?.duration || video.duration,pageUrl:video.pageUrl,userAgent:navigator.userAgent}});
+      height:variant?.height,wrapped:video.wrapped,title:name(video),filename:directName(video),duration:playerFor(video)?.duration || video.duration,pageUrl:video.pageUrl,userAgent:navigator.userAgent}});
     if(!result?.job?.id) throw new Error(result?.error || '后台未确认下载任务，请重新加载扩展后重试。');
     // Show the acknowledged task immediately, even if a concurrent history refresh is pending.
     if(!records.some(r=>r.id===result.job.id))records.unshift(result.job);

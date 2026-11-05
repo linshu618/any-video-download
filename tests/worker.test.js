@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import fs from 'node:fs/promises';
+import {wrap} from './png-fixture.js';
 const code=await fs.readFile(new URL('../background/service-worker.js',import.meta.url),'utf8');
 function event() {let callback; return {addListener(fn){callback=fn;},emit(...args){return callback?.(...args);}};}
 function harness(fetcher=fetch, initialStorage={}) {
@@ -11,8 +12,8 @@ function harness(fetcher=fetch, initialStorage={}) {
     runtime:{id:'test',onMessage:event(),sendMessage:async msg=>{messages.push(msg);}},webRequest:{onResponseStarted:event()}};
   chrome.storage.local=chrome.storage.session;
   chrome.downloads={onChanged:event(),search:async()=>[]};
-  vm.runInNewContext(code,{chrome,fetch:fetcher,URL,AbortSignal,TextDecoder,Uint8Array,structuredClone,crypto,console,setTimeout,clearTimeout});
-  return {chrome,messages,rows:()=>storage.media_v2_1?.videos || [],request(url,type='video/mp4'){chrome.webRequest.onResponseStarted.emit({tabId:1,url,statusCode:200,responseHeaders:[{name:'content-type',value:type}]});}};
+  vm.runInNewContext(code,{chrome,fetch:fetcher,URL,AbortSignal,TextDecoder,Uint8Array,structuredClone,crypto,console,setTimeout,clearTimeout,Blob,DecompressionStream,Response});
+  return {chrome,messages,rows:()=>storage.media_v2_1?.videos || [],request(url,type='video/mp4',requestType){chrome.webRequest.onResponseStarted.emit({tabId:1,url,statusCode:200,type:requestType,responseHeaders:[{name:'content-type',value:type}]});}};
 }
 async function until(check) {for(let i=0;i<100;i++){if(check())return;await new Promise(r=>setTimeout(r,10));}assert.fail('Timed out waiting for worker state');}
 
@@ -131,4 +132,22 @@ test('Navigation discards a native metadata response for the previous video',asy
 test('Missing native helper is shown as a specific discovery error',async()=>{
  const h=harness();h.chrome.tabs.get=async()=>({url:youtubeUrl});h.chrome.runtime.sendNativeMessage=async()=>{throw Error('Native host not found');};
  h.chrome.runtime.onMessage.emit({type:'GET_VIDEOS',tabId:1},{id:'test'},()=>{});await until(()=>h.messages.some(m=>/未找到本地助手/.test(m.mediaNotice||'')));assert.equal(h.rows().length,0);
+});
+
+test('A script-fetched PNG hiding an HLS playlist is listed as a downloadable wrapped stream',async()=>{
+  const list='#EXTM3U\n#EXTINF:8,\nhttps://seg.test/C-000.png\n#EXTINF:10,\nhttps://seg.test/C-001.png\n#EXT-X-ENDLIST';
+  const fetched=[];
+  const h=harness(async url=>{fetched.push(url);return {ok:true,url,body:new Blob([url.includes('index')?wrap(list,true):url.includes('C-')?wrap(Buffer.alloc(3000,0x47)):wrap(Buffer.alloc(0))]).stream()};});
+  h.request('https://cdn.test/hls/x/index.png?auth=1','image/png','xmlhttprequest');
+  h.request('https://cdn.test/logo.png','image/png','image');
+  h.request('https://seg.test/C-009.png','image/png','xmlhttprequest');
+  await until(()=>h.rows()[0]?.parsed);
+  await new Promise(r=>setTimeout(r,30));
+  const [row]=h.rows();
+  assert.equal(h.rows().length,1);
+  assert.equal(row.kind,'hls');assert.equal(row.wrapped,'png');assert.equal(row.duration,18);
+  assert.ok(!fetched.includes('https://cdn.test/logo.png'));
+  h.request('https://seg.test/C-000.png','image/png','xmlhttprequest');
+  await new Promise(r=>setTimeout(r,30));
+  assert.ok(!fetched.includes('https://seg.test/C-000.png'),'known segments are not probed again');
 });
